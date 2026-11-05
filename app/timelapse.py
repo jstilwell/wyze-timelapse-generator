@@ -401,10 +401,21 @@ def stitch(cfg, today, images=IMAGES, videos=VIDEOS):
     return problems
 
 
+def time_limit(job, seconds):
+    """End the whole job as a reported failure once it has run this long."""
+    def stop(*_):
+        print(f"PROBLEM: the {job} job ran too long and was stopped", flush=True)
+        os._exit(1)  # at once: a stuck camera thread or ffmpeg would keep a normal exit waiting
+
+    # A handler is needed: Python is process 1 in the container, and Linux drops signals that process does not handle.
+    signal.signal(signal.SIGALRM, stop)
+    signal.alarm(seconds)
+
+
 if __name__ == "__main__":
     job = sys.argv[1] if len(sys.argv) > 1 else ""
     # a hung camera or ffmpeg has to end as a failure, not as silence; a year of pictures can take hours to encode
-    signal.alarm(3600 if job == "grab" else 8 * 3600)
+    time_limit(job, 3600 if job == "grab" else 8 * 3600)
     if job not in ("grab", "stitch"):
         sys.exit("usage: timelapse.py grab|stitch")
     try:

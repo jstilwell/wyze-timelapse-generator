@@ -89,6 +89,7 @@ Edit `.env` with `open -e .env`. No need to run anything afterwards.
 | `the view was still blocked after 4 pictures` | Something is staying in front of the camera: go and look. If it belongs there, say so in the notes for Claude on the settings page. |
 | `the view could not be checked` | The picture was kept. The message says why: a missing or rejected `ANTHROPIC_API_KEY` in `.env`, or no internet. |
 | `only 1 of 3 snapshots were taken` | The Mac was asleep or off, or the camera was unreachable. Nothing to repair. |
+| `ran too long and was stopped` | Something hung: a camera, the storage drive or Docker. The next run starts fresh. If it keeps happening, restart Docker Desktop. |
 | `… is corrupt` | Delete the file it names from the pictures or videos folder, then run `./launchd/run.sh stitch`. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop. In its settings, turn on starting when you sign in. |
 | `bind source path does not exist` | The pictures or videos folder is missing. Reconnect the drive, then run `./launchd/install.sh`. |

@@ -7,6 +7,7 @@ import os
 import socket
 import ssl
 import subprocess
+import sys
 import tempfile
 import threading
 import unittest
@@ -586,6 +587,13 @@ class Server(unittest.TestCase):
         body = self.ask("POST", "/", {**FORM, "url": [web.mask(SECRET), ""], "action": ["test"]})[1]
         self.assertIn(b'src="data:image/jpeg;base64,ZnJhbWU="', body)
         self.assertNotIn(b"hunter2", body)
+
+
+class TimeLimit(unittest.TestCase):
+    def test_a_job_that_runs_too_long_is_stopped_and_says_so(self):
+        waits = "import select, timelapse as t; t.time_limit('grab', 1); select.select([], [], [], 5)"
+        r = subprocess.run([sys.executable, "-c", waits], capture_output=True, text=True, cwd=Path(__file__).parent)
+        self.assertEqual((r.returncode, r.stdout), (1, "PROBLEM: the grab job ran too long and was stopped\n"))
 
 
 class Media(unittest.TestCase):
