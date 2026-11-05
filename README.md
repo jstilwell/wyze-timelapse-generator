@@ -93,7 +93,8 @@ Edit `.env` with `open -e .env`. No need to run anything afterwards.
 | `certificate verify failed` | An `rtsps://` camera is showing a different certificate than the one stored when it was added. If the camera was reset or updated, tick "store its new certificate" for it on the settings page and save. |
 | `the view was still blocked after 4 pictures` | Something is staying in front of the camera: go and look. If it belongs there, say so in the notes for Claude on the settings page. |
 | `the view could not be checked` | The picture was kept. The message says why: a missing or rejected `ANTHROPIC_API_KEY` in `.env`, or no internet. |
-| `only 1 of 3 snapshots were taken` | The Mac was asleep or off, or the camera was unreachable. Nothing to repair. |
+| `only 1 of 3 snapshots were taken` | The Mac was asleep or off, or the camera was unreachable. Nothing to repair. A day on which the settings were saved is not counted. |
+| `has 1 frames, expected 14` | The camera's picture size changed part-way through that video. On the settings page under Look, switch off blending and flicker smoothing, save, then run `./launchd/run.sh stitch`. |
 | `ran too long and was stopped` | Something hung: a camera, the storage drive or Docker. The next run starts fresh. If it keeps happening, restart Docker Desktop. |
 | `… is corrupt` | Delete the file it names from the pictures or videos folder, then run `./launchd/run.sh stitch`. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop. In its settings, turn on starting when you sign in. |

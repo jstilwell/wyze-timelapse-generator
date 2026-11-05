@@ -298,8 +298,9 @@ def look(video, still=False):
     if video["shape"] != "original":
         w, h = video["shape"].split(":")
         chain.append(f"crop='min(iw,ih*{w}/{h})':'min(ih,iw*{h}/{w})'")
-    # shortcut: with Size and Shape left as the camera's, the frame follows the pictures, so a video whose
-    # pictures change resolution part-way fails to build; choosing a Size and a Shape makes every frame equal.
+    # shortcut: nothing evens out pictures of different sizes. When a camera's resolution changes part-way through
+    # a video, ffmpeg stretches the later pictures to the first one's frame, and with Blend or Deflicker on it
+    # drops frames, so build() refuses the result. Upgrade if cameras change resolution more than once in a while.
     height = "ih" if video["size"] == "original" else f"min(ih,{video['size']})"
     chain.append(f"scale=-2:'2*trunc({height}/2)':flags=lanczos")  # the encoders need even sizes
     if video["deflicker"] and not still:
@@ -378,10 +379,15 @@ def build(shots, out, fps, video, title):
         part.unlink(missing_ok=True)
 
 
-def stitch(cfg, today, images=IMAGES, videos=VIDEOS):
+def stitch(cfg, today, images=IMAGES, videos=VIDEOS, config=CONFIG):
     """Build every missing video whose period has ended. Safe to re-run: it catches up on anything a missed run
     left, and a video that fails is reported and tried again next time without holding up the others."""
     problems = []
+    yesterday = today - timedelta(days=1)
+    # Yesterday's pictures are counted against the picture times as they are now, so not when those may have
+    # changed since: the count would be a false alarm.
+    settled = not config.exists() or date.fromtimestamp(config.stat().st_mtime) < yesterday
+    yesterday = yesterday.isoformat()
     for cam in (c["name"] for c in cfg["cameras"]):
         days = sorted(d for d in (images / cam).glob("????-??-??") if d.name < today.isoformat())
         for level in LEVELS:
@@ -406,9 +412,8 @@ def stitch(cfg, today, images=IMAGES, videos=VIDEOS):
                         print("built", out)
                 except Exception as e:
                     problems.append(f"{cam}: {e}")
-        yesterday = (today - timedelta(days=1)).isoformat()
         got = len(list((images / cam / yesterday).glob("*.jpg")))
-        if got < len(cfg["times"]) and any(d.name < yesterday for d in days):  # skip a camera's first day
+        if settled and got < len(cfg["times"]) and any(d.name < yesterday for d in days):  # skip a camera's first day
             problems.append(f"{cam}: only {got} of {len(cfg['times'])} snapshots were taken on {yesterday}")
     return problems
 

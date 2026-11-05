@@ -714,6 +714,18 @@ class Media(unittest.TestCase):
         t.stitch(GOOD, today, self.images, self.videos)
         self.assertEqual(before, {p: p.stat().st_mtime_ns for p in self.videos.rglob("*.mp4")})
 
+    def test_no_missed_snapshot_alert_for_a_day_on_which_the_settings_changed(self):
+        self.fill(date(2026, 1, 5), date(2026, 1, 6), hours=("08",))  # one picture a day where GOOD asks for two
+        saved = Path(self.tmp.name, "config.json")
+        saved.touch()
+
+        def alerts(changed):
+            os.utime(saved, (changed.timestamp(), changed.timestamp()))
+            return t.stitch(GOOD, date(2026, 1, 7), self.images, self.videos, saved)
+
+        self.assertEqual(alerts(datetime(2026, 1, 6, 15)), [])  # the second picture time was added that afternoon
+        self.assertEqual(alerts(datetime(2026, 1, 5, 15)), ["cam1: only 1 of 2 snapshots were taken on 2026-01-06"])
+
     def test_each_kind_of_video_has_its_own_speed_window_and_switch(self):
         self.fill(date(2025, 12, 29), date(2025, 12, 31), hours=("08", "12", "20"))
         cfg = changed(daily={"make": False}, weekly={"make": False}, monthly={"fps": 3},
