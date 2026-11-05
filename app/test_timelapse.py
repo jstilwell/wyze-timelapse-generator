@@ -522,6 +522,25 @@ class Server(unittest.TestCase):
         self.assertEqual(body.count(b"<script>"), 1)  # only the hashed one that opens the model comparison
         self.assertEqual(self.ask("GET", "/snapshot/cam1")[:2], (200, b"jpeg bytes"))
 
+    def test_page_reports_how_the_last_runs_went(self):
+        logs = Path(self.tmp.name, "logs")
+        logs.mkdir()
+        self.addCleanup(setattr, web, "LOGS", web.LOGS)
+        web.LOGS = logs
+        self.assertEqual(self.ask("GET", "/")[0], 200)  # no run yet: nothing to report, and no trouble
+        (logs / "grab.log").write_text("=== 2026-11-04 16:00:02 grab exit=0\nsaved /images/cam1/x.jpg\n"
+                                       "=== 2026-11-05 08:00:09 grab exit=1\nsaved /images/cam1/y.jpg\n"
+                                       "PROBLEM: cam1: no usable frame <b>after</b> 3 attempts\n")
+        (logs / "stitch.log").write_text("=== 2026-11-05 00:30:41 stitch exit=0\nbuilt /videos/cam1/x.mp4\n")
+        body = self.ask("GET", "/")[1].decode()
+        self.assertIn("The last picture run (2026-11-05 at 08:00) had problems:<ul><li>cam1: no usable frame "
+                      "&lt;b&gt;after&lt;/b&gt; 3 attempts</li></ul>", body)
+        self.assertIn("Last video build: 2026-11-05 at 00:30, no problems.", body)
+        self.assertNotIn("saved /images", body)
+        # a failure without a PROBLEM line (Docker itself failed) shows the end of what was printed
+        (logs / "grab.log").write_text("=== 2026-11-05 12:00:01 grab exit=1\nCannot connect to the Docker daemon\n")
+        self.assertIn("<li>Cannot connect to the Docker daemon</li>", self.ask("GET", "/")[1].decode())
+
     def test_only_snapshots_are_served(self):
         for path in ("/snapshot/nope", "/snapshot/..", "/snapshot/../secret.txt", "/snapshot/%2e%2e/secret.txt",
                      "/snapshot/cam1/../../secret.txt", "/config/config.json", "/other"):

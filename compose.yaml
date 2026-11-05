@@ -49,4 +49,7 @@ services:
     entrypoint: [python, -u, /app/web.py]
     restart: unless-stopped
     ports: ["127.0.0.1:${WEB_PORT:-8080}:8080"]
-    volumes: [{ <<: *config, read_only: false }, { <<: *images, read_only: true }]
+    volumes:
+      - { <<: *config, read_only: false }
+      - { <<: *images, read_only: true }
+      - { type: bind, source: ./logs, target: /logs, read_only: true }  # the page shows how the last runs went

@@ -14,8 +14,8 @@ Other cameras with an `rtsp://` or `rtsps://` address work too, UniFi Protect in
 3. Open <http://localhost:8080>. Enter each camera's address, press **Test cameras** to see its picture,
    then **Save settings**.
 
-From then on it runs by itself. The settings page shows each camera's latest picture, and changes made
-there apply within seconds.
+From then on it runs by itself. The settings page shows each camera's latest picture and how the last run
+went, and changes made there apply within seconds.
 
 **Keep the Mac awake.** In System Settings, under Energy (or Battery, Options), turn on "Prevent automatic
 sleeping when the display is off". A sleeping Mac takes one late picture when it wakes instead of the ones
@@ -79,7 +79,7 @@ as the usual view. Leave those files where they are.
 
 | | |
 | --- | --- |
-| On the Mac | Any failure shows a notification. Details are in the `logs` folder. |
+| On the Mac | Any failure shows a notification, and the settings page lists the last run's problems. Details are in the `logs` folder. |
 | On a phone | Put an [ntfy.sh](https://ntfy.sh) topic address in `NOTIFY_URL` in `.env`. |
 | When it stops running | Put a [healthchecks.io](https://healthchecks.io) check address (period: 1 day) in `HEARTBEAT_URL` in `.env`. It alerts you when the Mac is off, logged out or otherwise silent. |
 

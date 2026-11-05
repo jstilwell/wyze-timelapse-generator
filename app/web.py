@@ -9,6 +9,7 @@ import socket
 import ssl
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
+from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from rtsp_grabber import GrabError, grab_frame
@@ -16,6 +17,8 @@ from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, PRICES_AS_OF, RANG
                        latest, read_config, still, validate, well_formed, with_defaults)
 
 MASK = "••••"  # shown in place of a saved camera password
+LOGS = Path("/logs")  # what launchd/run.sh wrote about every run; mounted read-only
+RUN = re.compile(r"^=== (\d{4}-\d\d-\d\d) (\d\d:\d\d):\d\d \w+ exit=(\d+)\n", re.M)  # run.sh's line above each run
 
 STYLE = """
 :root {
@@ -39,6 +42,7 @@ p { margin: 0; }
 section { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
 .hint, figcaption, .hours { color: var(--muted); font-size: .875rem; }
 .hint { max-width: 38rem; }
+.runs { margin-top: .5rem; }
 
 label, legend { display: block; font-weight: 600; font-size: .875rem; margin-top: 1rem; padding: 0; }
 input, textarea, select {
@@ -558,6 +562,32 @@ def load():
             'Saving replaces the file.</div>')
 
 
+def last_runs():
+    """How the latest picture run and the latest video build went, for the top of the page: the problems of one
+    that failed, a line for one that worked, nothing for one that has not run yet."""
+    failed, worked = "", []
+    for job, name in (("grab", "picture run"), ("stitch", "video build")):
+        try:
+            with open(LOGS / f"{job}.log", "rb") as log:
+                log.seek(max(0, log.seek(0, os.SEEK_END) - 20000))  # the log only grows; its end is enough
+                text = log.read().decode(errors="replace")
+        except OSError:
+            continue
+        runs = list(RUN.finditer(text))
+        if not runs:
+            continue
+        day, at, code = runs[-1].groups()
+        said = text[runs[-1].end():].strip().splitlines()
+        if code == "0":
+            worked.append(f"Last {name}: {day} at {at}, no problems.")
+            continue
+        # run.sh puts the same lines in the notification: the PROBLEM lines, or the end of the output without any
+        lines = [line[len("PROBLEM:"):].strip() for line in said if line.startswith("PROBLEM:")] or said[-3:]
+        items = "".join(f"<li>{html.escape(line[:300])}</li>" for line in lines)
+        failed += f'<div role="alert">The last {name} ({day} at {at}) had problems:<ul>{items}</ul></div>'
+    return failed + (f'<p class="hint runs">{" ".join(worked)}</p>' if worked else "")
+
+
 class Handler(BaseHTTPRequestHandler):
     timeout = 30  # a stalled client must not hold a thread forever
 
@@ -586,7 +616,7 @@ class Handler(BaseHTTPRequestHandler):
             cfg, message = load()
             if not message and urlsplit(self.path).query == "saved":
                 message = '<div role="status">Settings saved. The schedule updates within a few seconds.</div>'
-            self.reply(200, render(cfg, message))
+            self.reply(200, render(cfg, message + last_runs()))
         elif path and path.startswith("/snapshot/") and (shot := latest(path[len("/snapshot/"):], IMAGES)):
             self.reply(200, shot.read_bytes(), "image/jpeg")
         elif path:
