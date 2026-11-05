@@ -17,6 +17,7 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 | --- | --- |
 | `app/timelapse.py` | `grab` and `stitch` jobs, the video look, config validation and defaults |
 | `app/rtsp_grabber.py` | One frame from an RTSP stream through ffmpeg |
+| `app/view.py` | The optional Claude check for a blocked view (the only code that calls the Claude API) |
 | `app/web.py` | Settings page: stdlib `http.server`, no JavaScript, no external assets |
 | `app/test_timelapse.py` | Every test. They run inside the image, where ffmpeg is. |
 | `launchd/install.sh` | Writes `.env`, starts the page, creates the LaunchAgents from `config/config.json` |
@@ -27,8 +28,13 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 
 ## Rules that are easy to break
 
-- Python standard library only, plus `piexif`, and the DejaVu font package for the date stamp. Images,
-  packages and CI actions are pinned by digest, hash or version; Dependabot moves all but the font.
+- Python standard library only, plus `piexif`, the `anthropic` SDK (used by `view.py` alone), and the DejaVu
+  font package for the date stamp. Images, packages and CI actions are pinned by digest, hash or version;
+  Dependabot moves all but the font. After changing `requirements.in`, regenerate the lock with
+  `uv pip compile requirements.in --generate-hashes --universal --python-version 3.13 --no-header -o requirements.txt`.
+- Claude is called only through the official SDK, never raw HTTP. `ANTHROPIC_API_KEY` goes to the grab
+  container only; the settings page must never receive or show it. A failed or refused check never costs a
+  picture: `snapshot()` saves one regardless and returns a note for the alert.
 - The page answers only as `localhost` (Host check) and accepts a POST only with a matching `Origin`. Do
   not set `Referrer-Policy: no-referrer`: browsers then send `Origin: null` and the page's own form is
   refused. Unit tests cannot see this.

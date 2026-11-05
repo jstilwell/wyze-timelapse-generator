@@ -1,7 +1,9 @@
 """Run inside the image: docker compose run --rm --entrypoint python stitch -m unittest discover -s /app -v"""
 import base64
 import http.client
+import http.server
 import json
+import os
 import socket
 import ssl
 import subprocess
@@ -15,6 +17,7 @@ from urllib.parse import urlencode
 import piexif
 
 import timelapse as t
+import view
 from rtsp_grabber import GrabError, grab_frame
 import web
 
@@ -206,6 +209,17 @@ class Form(unittest.TestCase):
                            ("rtsp://10.0.0.5:7441/abc", {}), ("rtsps://10.0.0.5:7441/abc", {"repin": ["0"]})):
             self.assertNotIn("cert", camera(url, **extra), (url, extra))
 
+    def test_view_check_settings_come_back_from_the_form(self):
+        cfg, errors = web.from_form({**FORM, "check_view": ["on"], "view_notes": ["  The <post> is always there. "]})
+        self.assertEqual((cfg["check_view"], cfg["view_notes"], errors + t.validate(cfg)),
+                         (True, "The <post> is always there.", []))
+        page = web.render(cfg)
+        self.assertIn('name="check_view" checked', page)
+        self.assertIn("The &lt;post&gt; is always there.</textarea>", page)
+        self.assertNotIn('name="check_view" checked', web.render(GOOD))
+        self.assertEqual(len(t.validate({**GOOD, "view_notes": "x" * 2001})), 1)
+        self.assertEqual(len(t.validate({**GOOD, "check_view": "yes"})), 1)
+
     def test_look_and_per_video_settings_come_back_from_the_form(self):
         form = {**FORM, "yearly_from": ["11:00"], "yearly_to": ["13:00"], "yearly_fps": ["30"], "size": ["1080"],
                 "stamp": ["datetime"], "deflicker": ["on"], "brightness": ["-10"]}
@@ -231,6 +245,150 @@ class Form(unittest.TestCase):
                       web.plays(changed(yearly={"from": "11:00", "to": "13:00", "fps": 5}), "yearly"))
         self.assertIn("No picture time", web.plays(changed(weekly={"from": "20:00"}), "weekly"))
         self.assertEqual(web.plays(changed(daily={"make": False}), "daily"), "Not made.")
+
+
+def fake_claude(test, *answers):
+    """A stand-in for api.anthropic.com, reached through the SDK's own ANTHROPIC_BASE_URL setting. Each request
+    gets the next answer: a (blocked, reason) verdict, "refusal", or an HTTP error status. Returns the requests."""
+    script, requests = list(answers), []
+
+    class Handler(http.server.BaseHTTPRequestHandler):
+        def log_message(self, *args):
+            pass
+
+        def do_POST(self):
+            body = json.loads(self.rfile.read(int(self.headers["Content-Length"])))
+            requests.append({"path": self.path, "headers": {k.lower(): v for k, v in self.headers.items()},
+                             "body": body})
+            answer = script.pop(0)
+            if isinstance(answer, int):
+                status, reply = answer, {"type": "error", "error": {"type": "authentication_error", "message": "no"}}
+            else:
+                refused = answer == "refusal"
+                text = "" if refused else json.dumps({"blocked": answer[0], "reason": answer[1]})
+                status, reply = 200, {
+                    "id": "msg_test", "type": "message", "role": "assistant", "model": body["model"],
+                    "content": [] if refused else [{"type": "text", "text": text}],
+                    "stop_reason": "refusal" if refused else "end_turn", "stop_sequence": None,
+                    "usage": {"input_tokens": 2000, "output_tokens": 30}}
+            data = json.dumps(reply).encode()
+            self.send_response(status)
+            self.send_header("Content-Type", "application/json")
+            self.send_header("Content-Length", str(len(data)))
+            self.end_headers()
+            self.wfile.write(data)
+
+    server = http.server.ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    threading.Thread(target=server.serve_forever, daemon=True).start()
+    test.addCleanup(server.server_close)
+    test.addCleanup(server.shutdown)
+    old = {key: os.environ.get(key) for key in ("ANTHROPIC_BASE_URL", "ANTHROPIC_API_KEY")}
+    test.addCleanup(lambda: [os.environ.pop(k, None) if v is None else os.environ.__setitem__(k, v)
+                             for k, v in old.items()])
+    os.environ.update(ANTHROPIC_BASE_URL=f"http://127.0.0.1:{server.server_port}", ANTHROPIC_API_KEY="sk-test-key")
+    return requests
+
+
+class ViewCheck(unittest.TestCase):
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        self.images = Path(self.tmp.name, "images")
+        self.shot = self.images / "cam1" / "2026-11-04" / "cam1_2026-11-04_12-00-00.jpg"
+        jpeg(self.shot)
+        self.frame = self.shot.read_bytes()
+        old = t.time.sleep
+        self.addCleanup(lambda: setattr(t.time, "sleep", old))
+        self.slept = []
+        t.time.sleep = self.slept.append
+
+    def test_request_carries_both_pictures_the_notes_and_asks_for_a_strict_verdict(self):
+        requests = fake_claude(self, (True, "a  cat sitting\nright in front of the lens"), (False, ""))
+        self.assertEqual(view.blocked(self.frame, "cam1", self.shot, "The post is always there."),
+                         "a cat sitting right in front of the lens")
+        self.assertEqual(view.blocked(self.frame, "cam1"), "")
+        first, second = (r["body"] for r in requests)
+        self.assertEqual(first["model"], "claude-opus-5-5")
+        self.assertEqual(first["fallbacks"], "default")
+        self.assertIn("server-side-fallback-2026-07-01", requests[0]["headers"]["anthropic-beta"])
+        self.assertIn("sk-test-key", requests[0]["headers"]["authorization"])  # the SDK took the key from .env
+        self.assertEqual(first["output_config"], {"effort": "low", "format": {"type": "json_schema",
+                                                                              "schema": view.VERDICT}})
+        self.assertNotIn("temperature", first)  # refused by current models
+        kinds = [block["type"] for block in first["messages"][0]["content"]]
+        self.assertEqual(kinds, ["text", "image", "text", "image", "text", "text"])
+        self.assertIn("<notes>\nThe post is always there.\n</notes>", first["messages"][0]["content"][4]["text"])
+        sent = base64.b64decode(first["messages"][0]["content"][3]["source"]["data"])
+        self.assertEqual(t.probe(sent)["width"], 320)  # small pictures are not enlarged
+        # no earlier picture and no notes: just the new picture and the question
+        self.assertEqual([block["type"] for block in second["messages"][0]["content"]], ["text", "image", "text"])
+
+    def test_failures_say_what_went_wrong_without_the_key(self):
+        requests = fake_claude(self, 401, "refusal")
+        for expected in ("did not accept ANTHROPIC_API_KEY", "no verdict (refusal)"):
+            with self.assertRaises(view.CheckError) as caught:
+                view.blocked(self.frame, "cam1")
+            self.assertIn(expected, str(caught.exception))
+            self.assertNotIn("sk-test-key", str(caught.exception))
+        os.environ["ANTHROPIC_API_KEY"] = ""
+        with self.assertRaises(view.CheckError) as caught:
+            view.blocked(self.frame, "cam1")
+        self.assertIn("ANTHROPIC_API_KEY is not set", str(caught.exception))
+        self.assertEqual(len(requests), 2)  # nothing was sent without a key
+
+    def snap(self, verdicts, frames=None):
+        """Run snapshot() with a scripted check; returns (grabs made, note, which frame was saved)."""
+        made, grabs, self.compared = [], [], []
+        for seed in range(5):
+            jpeg(Path(self.tmp.name, f"frame{seed}.jpg"), seed * 60)
+            made.append(Path(self.tmp.name, f"frame{seed}.jpg").read_bytes())
+
+        def grab(url, quality, **pin):
+            grabs.append(1)
+            if frames and len(grabs) > frames:
+                raise GrabError("camera went away")
+            return made[len(grabs) - 1]
+
+        def check(frame, camera, usual):
+            self.compared.append((camera, usual))
+            verdict = verdicts.pop(0)
+            if isinstance(verdict, Exception):
+                raise verdict
+            return verdict
+
+        out, note = t.snapshot(grab, GOOD["cameras"][0], 95, self.images, check)
+        kept = next(i for i, m in enumerate(made) if m[-2000:] == out.read_bytes()[-2000:])
+        return len(grabs), note, kept
+
+    def test_blocked_pictures_are_retaken_until_the_view_clears(self):
+        self.assertEqual(self.snap(["a person", "a person", ""]), (3, None, 2))
+        self.assertEqual(self.slept, [t.RETAKE_WAIT] * 2)
+        self.assertEqual(self.compared, [("cam1", self.shot)] * 3)  # the last saved picture is the comparison
+
+    def test_a_picture_is_always_kept_and_the_alert_says_why(self):
+        grabs, note, kept = self.snap(["a tarp"] * 4)
+        self.assertEqual((grabs, kept), (4, 3))
+        self.assertIn("still blocked after 4 pictures (a tarp)", note)
+        grabs, note, kept = self.snap([view.CheckError("Anthropic could not be reached")])
+        self.assertEqual((grabs, kept), (1, 0))
+        self.assertIn("could not be checked (Anthropic could not be reached); the picture was kept", note)
+        grabs, note, kept = self.snap(["a bird"], frames=1)
+        self.assertEqual(kept, 0)
+        self.assertIn("blocked (a bird) and the retake failed", note)
+
+    def test_grab_job_checks_only_when_switched_on_and_reports_a_view_that_stays_blocked(self):
+        old = t.grab_frame
+        self.addCleanup(lambda: setattr(t, "grab_frame", old))
+        t.grab_frame = lambda url, quality, **pin: self.frame
+        requests = fake_claude(self, *[(True, "a ladder")] * 4)
+        self.assertEqual(t.grab(GOOD, self.images), [])
+        self.assertEqual(requests, [])
+        problems = t.grab({**GOOD, "check_view": True, "view_notes": "Ignore the hose."}, self.images)
+        self.assertEqual(len(problems), 1)
+        self.assertIn("cam1: the view was still blocked after 4 pictures (a ladder)", problems[0])
+        self.assertEqual(len(requests), 4)
+        self.assertIn("Ignore the hose.", json.dumps(requests[0]["body"]))
+        self.assertGreater(len(list(self.images.rglob("cam1_*.jpg"))), 1)  # the blocked picture was still saved
 
 
 class Pinning(unittest.TestCase):
@@ -409,7 +567,8 @@ class Media(unittest.TestCase):
     def test_snapshot_writes_validated_tagged_jpeg_and_rejects_bad_frames(self):
         src = self.images / "src.jpg"
         jpeg(src)
-        out = t.snapshot(lambda url, quality, **pin: src.read_bytes(), GOOD["cameras"][0], 95, self.images)
+        out, note = t.snapshot(lambda url, quality, **pin: src.read_bytes(), GOOD["cameras"][0], 95, self.images)
+        self.assertIsNone(note)
         self.assertEqual(out.parent.parent.name, "cam1")
         exif = piexif.load(str(out))
         self.assertEqual(exif["0th"][piexif.ImageIFD.Make], b"Wyze")

@@ -43,6 +43,7 @@ RANGES = {"brightness": (-50, 50), "contrast": (50, 200), "saturation": (0, 300)
 VIDEO = {**{key: options[0] for key, options in CHOICES.items()}, **dict.fromkeys(SWITCHES, False),
          "brightness": 0, "contrast": 100, "saturation": 100}
 LEVEL = {"make": True, "fps": 24, "from": "00:00", "to": "23:59"}  # per kind of video: speed and time-of-day window
+RETAKES, RETAKE_WAIT = 3, 30  # a blocked view gets this many more pictures, this many seconds apart
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 URL = re.compile(r"rtsps?://\S+")
 
@@ -52,6 +53,8 @@ def with_defaults(cfg):
     if isinstance(cfg, dict) and isinstance(cfg.get("video", {}), dict) and isinstance(cfg.get("levels", {}), dict):
         fps = cfg.pop("fps", LEVEL["fps"])
         cfg["video"] = {**VIDEO, **cfg.get("video", {})}
+        cfg.setdefault("check_view", False)
+        cfg.setdefault("view_notes", "")
         given = cfg.get("levels", {})
         cfg["levels"] = {}
         for level in LEVELS:
@@ -68,6 +71,7 @@ def read_config():
 def well_formed(cfg):
     """True when every setting is the right kind of value, so validate() and the settings page can read it."""
     return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str) and isinstance(cfg.get("video"), dict)
+            and isinstance(cfg.get("view_notes"), str)
             and isinstance(cfg.get("levels"), dict)
             and all(isinstance(cfg["levels"].get(level), dict) and isinstance(cfg["levels"][level].get("from"), str)
                     and isinstance(cfg["levels"][level].get("to"), str) for level in LEVELS)
@@ -103,6 +107,10 @@ def validate(cfg):
 
     if not whole(cfg.get("jpeg_quality"), 1, 100):
         errs.append("picture quality: a whole number from 1 to 100")
+    if type(cfg.get("check_view")) is not bool:
+        errs.append("check each picture: on or off")
+    if len(cfg["view_notes"]) > 2000:
+        errs.append("notes for Claude: 2,000 characters at most")
     for level in LEVELS:
         own = cfg["levels"][level]
         if type(own.get("make")) is not bool or not whole(own.get("fps"), 1, 60):
@@ -139,17 +147,54 @@ def probe(src):
 
 # ---- grab ----------------------------------------------------------------------------------------------------------
 
-def snapshot(grab, cam, quality, images):
+def latest(cam, images):
+    """Newest saved picture of a camera, or None. `cam` may come from a web request, so it is checked before
+    it becomes a path."""
+    if NAME.fullmatch(cam):
+        for day in sorted((images / cam).glob("????-??-??"), reverse=True):
+            shots = sorted(p for p in day.glob(f"{cam}_*.jpg") if SHOT.fullmatch(p.name))
+            if shots:
+                return shots[-1]
+
+
+def frame(grab, cam, quality):
+    """One decodable JPEG from the camera and its size, within three tries."""
     for attempt in range(3):
         try:
             jpeg = grab(cam["url"], quality, cert=cam.get("cert"), cert_host=cam.get("cert_host"))
-            size = probe(jpeg)
-            break
+            return jpeg, probe(jpeg)
         except (GrabError, ValueError) as e:
             error = e
             time.sleep(2)
-    else:
-        raise RuntimeError(f"no usable frame after 3 attempts: {error}")
+    raise RuntimeError(f"no usable frame after 3 attempts: {error}")
+
+
+def snapshot(grab, cam, quality, images, check=None):
+    """Save one picture and return (its path, a note for the alert or None).
+
+    `check(jpeg, camera name, usual picture)` says what is blocking the view ("" for nothing). A blocked picture
+    is taken again; whatever happens after the first good frame, a picture is saved, and the note says so when
+    the check failed or the view never cleared."""
+    jpeg, size = frame(grab, cam, quality)
+    note = None
+    for retake in range(RETAKES + 1) if check else ():
+        try:
+            reason = check(jpeg, cam["name"], latest(cam["name"], images))
+        except Exception as e:  # no key, no network, an API fault: the picture matters more than the check
+            note = f"the view could not be checked ({e}); the picture was kept"
+            break
+        if not reason:
+            break
+        print(f"{cam['name']}: view blocked ({reason})")
+        if retake == RETAKES:
+            note = f"the view was still blocked after {RETAKES + 1} pictures ({reason}); the last one was kept"
+            break
+        time.sleep(RETAKE_WAIT)
+        try:
+            jpeg, size = frame(grab, cam, quality)
+        except RuntimeError as e:
+            note = f"the view was blocked ({reason}) and the retake failed ({e}); the blocked picture was kept"
+            break
 
     now = datetime.now().astimezone()
     stamp, off = now.strftime("%Y:%m:%d %H:%M:%S"), now.strftime("%z")
@@ -189,14 +234,23 @@ def snapshot(grab, cam, quality, images):
         os.replace(part, final)
     finally:
         part.unlink(missing_ok=True)
-    return final
+    return final, note
 
 
 def grab(cfg, images=IMAGES):
+    check = None
+    if cfg["check_view"]:
+        import view  # the Claude SDK is only loaded when the check is switched on
+
+        def check(jpeg, camera, usual):
+            return view.blocked(jpeg, camera, usual, cfg["view_notes"])
     problems = []
     for cam in cfg["cameras"]:
         try:
-            print("saved", snapshot(grab_frame, cam, cfg["jpeg_quality"], images))
+            saved, note = snapshot(grab_frame, cam, cfg["jpeg_quality"], images, check)
+            print("saved", saved)
+            if note:
+                problems.append(f"{cam['name']}: {note}")
         except Exception as e:
             problems.append(f"{cam['name']}: {e}")
     return problems

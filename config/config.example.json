@@ -53,5 +53,7 @@
     "brightness": 0,
     "contrast": 100,
     "saturation": 100
-  }
+  },
+  "check_view": false,
+  "view_notes": ""
 }

@@ -52,6 +52,20 @@ All on the settings page:
 Changes apply to videos built from then on. To remake a video, delete its file and run
 `./launchd/run.sh stitch`, or wait for the next night.
 
+## Checking for a blocked view (optional)
+
+Claude, Anthropic's AI, can look at each picture as it is taken. If something close to the camera is in the
+way, the picture is taken again half a minute later, up to three more times. Movement further back in the
+scene is left alone. A picture is always kept, even when the check fails.
+
+1. Get an API key at <https://platform.claude.com>.
+2. Run `open -e .env` and put the key after `ANTHROPIC_API_KEY=`.
+3. On the settings page, tick **Check each picture with Claude**. In the box below it, describe anything
+   Claude should know, such as "the white post on the left is always there".
+
+Each check sends the new picture and the camera's previous one, shrunk, to Anthropic, and costs about a
+cent or two. The key stays in `.env` and is never shown on the settings page.
+
 ## Alerts
 
 | | |
@@ -68,6 +82,8 @@ Edit `.env` with `open -e .env`. No need to run anything afterwards.
 | --- | --- |
 | `no usable frame after 3 attempts` | The camera is off, has a new address, or its password changed. Check it with **Test cameras**. |
 | `certificate verify failed` | An `rtsps://` camera is showing a different certificate than the one stored when it was added. If the camera was reset or updated, tick "store its new certificate" for it on the settings page and save. |
+| `the view was still blocked after 4 pictures` | Something is staying in front of the camera: go and look. If it belongs there, say so in the notes for Claude on the settings page. |
+| `the view could not be checked` | The picture was kept. The message says why: a missing or rejected `ANTHROPIC_API_KEY` in `.env`, or no internet. |
 | `only 1 of 3 snapshots were taken` | The Mac was asleep or off, or the camera was unreachable. Nothing to repair. |
 | `… is corrupt` | Delete the file it names from the pictures or videos folder, then run `./launchd/run.sh stitch`. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop. In its settings, turn on starting when you sign in. |

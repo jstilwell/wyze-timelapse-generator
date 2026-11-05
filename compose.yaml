@@ -30,6 +30,9 @@ services:
     <<: *app
     profiles: [job]
     command: [grab]
+    environment:  # the key for the optional Claude view check; only this job gets it
+      TZ: ${TIMEZONE:?set TIMEZONE in .env}
+      ANTHROPIC_API_KEY: ${ANTHROPIC_API_KEY:-}
     volumes: [*config, *images]
 
   # Build any missing daily/weekly/monthly/yearly videos, then exit:  docker compose run --rm stitch

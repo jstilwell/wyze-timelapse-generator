@@ -12,7 +12,7 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from rtsp_grabber import GrabError, grab_frame
-from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, NAME, RANGES, SHOT, SWITCHES, URL, read_config, still,
+from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, RANGES, SWITCHES, URL, latest, read_config, still,
                        validate, well_formed, with_defaults)
 
 MASK = "••••"  # shown in place of a saved camera password
@@ -146,6 +146,21 @@ and yearly videos.</p>
   </section>
 
   <section>
+    <h2>Blocked view check</h2>
+    <p class="hint">Claude, Anthropic's AI, can look at each picture as it is taken. If something close to the
+    camera is in the way, the picture is taken again half a minute later, up to three more times. Movement further
+    back in the scene is left alone.</p>
+    <p class="ticks"><label class="tick"><input type="checkbox" name="check_view"{check_view}>Check each picture with
+      Claude</label></p>
+    <label for="view_notes">What Claude should know about your cameras</label>
+    <textarea id="view_notes" name="view_notes" rows="4" maxlength="2000" aria-describedby="notes-hint"
+      placeholder="The white post on the left of front-yard is always there. Birds on the feeder are fine.">{view_notes}</textarea>
+    <p class="hint" id="notes-hint">Optional, and sent with every check. Checking needs an Anthropic API key in the
+    .env file (see the README) and sends each picture, shrunk, to Anthropic along with the camera's previous one.
+    Each check costs a little.</p>
+  </section>
+
+  <section>
     <h2>Videos</h2>
     <p class="hint">Each kind of video has its own speed and can use only the pictures taken in part of the day.
     A narrow window, such as 11:00 to 13:00 for the yearly video, stops day and night flashing past.</p>
@@ -218,15 +233,6 @@ def pin(url):
     return {"cert": cert, "cert_host": names[0]}
 
 
-def latest(cam):
-    """Newest saved picture of a camera, or None. `cam` comes from the request, so it is checked before it is a path."""
-    if NAME.fullmatch(cam):
-        for day in sorted((IMAGES / cam).glob("????-??-??"), reverse=True):
-            shots = sorted(p for p in day.glob(f"{cam}_*.jpg") if SHOT.fullmatch(p.name))
-            if shots:
-                return shots[-1]
-
-
 def try_camera(cam):
     """Grab one live frame and return what to show in the camera's picture slot."""
     if not URL.fullmatch(cam["url"]) or MASK in cam["url"]:
@@ -249,7 +255,7 @@ def try_camera(cam):
 
 def preview(cam, video):
     """The look applied to a camera's latest picture, for its picture slot."""
-    shot = latest(cam["name"])
+    shot = latest(cam["name"], IMAGES)
     if not shot:
         return '<p class="empty hint">No picture yet to preview. The first one arrives at the next picture time.</p>'
     try:
@@ -264,7 +270,7 @@ def preview(cam, video):
 def camera_rows(cameras, secret, tests):
     rows = []
     for i, cam in enumerate([*cameras, {"name": "", "url": ""}]):
-        name, shot = html.escape(cam["name"]), latest(cam["name"])
+        name, shot = html.escape(cam["name"]), latest(cam["name"], IMAGES)
         if tests and i < len(tests):
             picture = tests[i]
         elif shot:
@@ -405,6 +411,8 @@ def render(cfg, message="", saved=None, tests=None):
         times=html.escape(", ".join(cfg["times"])),
         stitch_time=html.escape(cfg["stitch_time"]),
         jpeg_quality=html.escape(str(cfg.get("jpeg_quality", ""))),
+        check_view=" checked" * (cfg.get("check_view") is True),
+        view_notes=html.escape(cfg["view_notes"]),
         levels=level_rows(cfg),
         look=look_controls(cfg["video"]),
     )
@@ -448,7 +456,8 @@ def from_form(form, saved=()):
     video = ({key: field(key) for key in CHOICES} | {key: key in form for key in SWITCHES}
              | {key: number(key) for key in RANGES})
     return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"),
-            "jpeg_quality": number("jpeg_quality"), "levels": levels, "video": video}, errors
+            "jpeg_quality": number("jpeg_quality"), "levels": levels, "video": video,
+            "check_view": "check_view" in form, "view_notes": field("view_notes")}, errors
 
 
 def load():
@@ -493,7 +502,7 @@ class Handler(BaseHTTPRequestHandler):
             if not message and urlsplit(self.path).query == "saved":
                 message = '<div role="status">Settings saved. The schedule updates within a few seconds.</div>'
             self.reply(200, render(cfg, message))
-        elif path and path.startswith("/snapshot/") and (shot := latest(path[len("/snapshot/"):])):
+        elif path and path.startswith("/snapshot/") and (shot := latest(path[len("/snapshot/"):], IMAGES)):
             self.reply(200, shot.read_bytes(), "image/jpeg")
         elif path:
             self.send_error(404)
