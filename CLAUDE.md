@@ -77,3 +77,33 @@ printf 'IMAGES_PATH=/tmp/wt\nVIDEOS_PATH=/tmp/wt\nTIMEZONE=UTC\nWEB_PORT=18080\n
 docker compose -p wyze-test --env-file /tmp/wt.env up -d --build web   # http://localhost:18080
 docker compose -p wyze-test --env-file /tmp/wt.env down
 ```
+
+## Git conventions
+
+### Commit messages: [Conventional Commits 1.0.0](https://www.conventionalcommits.org/en/v1.0.0/)
+
+- Format: `<type>(<optional scope>): <description>`, in the imperative mood, lowercase, with no trailing period
+- Types: `feat` (MINOR release), `fix` (PATCH release); also `build`, `chore`, `ci`, `docs`, `perf`, `refactor`,
+  `style`, `test`
+- Breaking changes: append `!` after the type or scope (e.g. `feat(api)!:`) and/or add a
+  `BREAKING CHANGE: <description>` footer (MAJOR release)
+- Body (optional): separated from the subject by a blank line, explains the "why"
+- Example: `fix(auth): prevent token refresh race condition`
+
+### Branch names: [Conventional Branch 1.1.0](https://conventionalbranch.org/)
+
+- Format: `<type>/<short-description>` in kebab-case, e.g. `feature/add-login`, `bugfix/timeout-on-save`
+- Types: `feature/` (or `feat/`), `bugfix/` (or `fix/`), `hotfix/`, `release/`, `chore/`
+- Only lowercase letters, numbers and hyphens; no consecutive, leading or trailing hyphens (dots are allowed
+  for versions, e.g. `release/v1.2.0`)
+- Include the ticket or issue number when one exists: `feature/issue-123-new-login`
+- The trunk branch `main` takes no prefix
+
+### Versioning: [SemVer 2.0.0](https://semver.org/)
+
+- `MAJOR.MINOR.PATCH`: a breaking change raises MAJOR, a backward-compatible feature MINOR, a
+  backward-compatible fix PATCH
+- `0.y.z` is development territory: anything may change at any time
+- Pre-releases: `-alpha.1`, `-rc.2` suffixes; build metadata: `+build.5`
+- Never re-tag or modify a released version: bump instead
+- A release is an annotated tag `vMAJOR.MINOR.PATCH` on `main`. The first is `v0.1.0`.
