@@ -7,6 +7,8 @@ x-app: &app
     TZ: ${TIMEZONE:?set TIMEZONE in .env}
   cap_drop: [ALL]
   security_opt: ["no-new-privileges:true"]
+  read_only: true
+  tmpfs: [/tmp]  # the only writable place besides the mounted folders
 
 # create_host_path: false makes a missing or unmounted storage folder an error instead of
 # letting Docker quietly create an empty one and fill the wrong disk.
@@ -44,4 +46,4 @@ services:
     entrypoint: [python, -u, /app/web.py]
     restart: unless-stopped
     ports: ["127.0.0.1:${WEB_PORT:-8080}:8080"]
-    volumes: [{ <<: *config, read_only: false }]
+    volumes: [{ <<: *config, read_only: false }, { <<: *images, read_only: true }]

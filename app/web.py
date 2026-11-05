@@ -1,11 +1,87 @@
-"""Config editor for the timelapse jobs. compose.yaml publishes it on 127.0.0.1 only."""
+"""Settings page for the timelapse jobs. compose.yaml publishes it on 127.0.0.1 only."""
+import base64
+import hashlib
 import html
 import json
 import os
+import re
+from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
-from urllib.parse import parse_qs
+from urllib.parse import parse_qs, urlsplit
 
-from timelapse import CONFIG, read_config, validate
+from rtsp_grabber import GrabError, grab_frame
+from timelapse import CONFIG, HHMM, IMAGES, NAME, URL, read_config, validate, well_formed
+
+MASK = "••••"  # shown in place of a saved camera password
+
+STYLE = """
+:root {
+  color-scheme: light dark;
+  --paper: #f2f4f1; --surface: #fff; --ink: #17262b; --muted: #55676d; --line: #c9d3d1; --edge: #84959a;
+  --accent: #0b5c7a; --on-accent: #fff; --ok: #1f7a4d; --bad: #b42318;
+  font: 16px/1.5 "Avenir Next", Avenir, system-ui, sans-serif;
+}
+@media (prefers-color-scheme: dark) {
+  :root {
+    --paper: #11191c; --surface: #19242a; --ink: #e6edee; --muted: #9babaf; --line: #2c3a40; --edge: #62757d;
+    --accent: #6cc1e0; --on-accent: #0c1418; --ok: #6fcf97; --bad: #ff8a80;
+  }
+}
+* { box-sizing: border-box; }
+body { margin: 0; background: var(--paper); color: var(--ink); }
+main { max-width: 46rem; margin: 0 auto; padding: 2.5rem 1.25rem 4rem; }
+h1 { font-size: 1.75rem; line-height: 1.2; font-weight: 600; letter-spacing: -.01em; margin: 0; }
+h2 { font-size: 1.125rem; font-weight: 600; margin: 0 0 .25rem; }
+p { margin: 0; }
+section { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--line); }
+.hint, figcaption, .hours { color: var(--muted); font-size: .875rem; }
+.hint { max-width: 38rem; }
+
+label, legend { display: block; font-weight: 600; font-size: .875rem; margin-top: 1rem; padding: 0; }
+input, textarea {
+  display: block; width: 100%; margin-top: .25rem; padding: .5rem .625rem;
+  font: inherit; font-variant-numeric: tabular-nums; color: inherit;
+  background: var(--surface); border: 1px solid var(--edge); border-radius: 6px;
+}
+textarea { resize: vertical; }
+input[type=time], input[type=number] { max-width: 12rem; }
+:focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
+
+.camera { border: 0; margin: 1.5rem 0 0; padding: 0; min-width: 0; }
+.camera legend { font-size: 1rem; margin: 0; }
+.row { display: grid; grid-template-columns: 15rem 1fr; gap: 0 1.25rem; align-items: start; }
+.row label:first-child { margin-top: .5rem; }
+figure { margin: .5rem 0 0; }
+figure img, .empty { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 6px; }
+figure img { object-fit: cover; background: var(--line); }
+.empty { display: grid; place-items: center; padding: 1rem; text-align: center; border: 1px dashed var(--edge); }
+figcaption { margin-top: .375rem; }
+.ok { color: var(--ok); }
+.bad { color: var(--bad); }
+
+.day { display: block; width: 100%; height: 2.75rem; margin-top: 1rem; }
+.day line { stroke: var(--ink); stroke-width: 2; vector-effect: non-scaling-stroke; }
+.day .build { stroke: var(--accent); stroke-width: 5; }
+.hours { display: flex; justify-content: space-between; font-size: .75rem; font-variant-numeric: tabular-nums; }
+
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 1.25rem; }
+details { margin-top: 1rem; }
+summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: .875rem; }
+
+.actions { display: flex; flex-wrap: wrap; align-items: center; gap: .75rem 1rem; }
+button {
+  font: inherit; font-weight: 600; padding: .625rem 1.25rem; cursor: pointer;
+  color: var(--on-accent); background: var(--accent); border: 1px solid var(--accent); border-radius: 6px;
+}
+button.quiet { color: var(--accent); background: transparent; }
+[role=status], [role=alert] {
+  margin-top: 1.5rem; padding: .75rem 1rem; background: var(--surface);
+  border-left: 4px solid var(--ok); border-radius: 0 6px 6px 0;
+}
+[role=alert] { border-left-color: var(--bad); }
+[role=alert] ul { margin: .25rem 0 0; padding-left: 1.25rem; }
+@media (max-width: 36rem) { .row { grid-template-columns: 1fr; } }
+"""
 
 PAGE = """<!doctype html>
 <html lang="en">
@@ -13,126 +89,309 @@ PAGE = """<!doctype html>
 <meta charset="utf-8">
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Wyze timelapse settings</title>
-<style>
-  :root {{ color-scheme: light dark; font: 16px/1.5 system-ui, sans-serif; }}
-  body {{ max-width: 42rem; margin: 2rem auto; padding: 0 1rem; }}
-  label {{ display: block; font-weight: 600; margin-top: 1.25rem; }}
-  small {{ display: block; font-weight: 400; opacity: .75; }}
-  input, textarea {{ width: 100%; box-sizing: border-box; font: inherit; padding: .5rem; margin-top: .25rem; }}
-  textarea {{ font-family: ui-monospace, monospace; font-size: .875rem; white-space: pre; }}
-  button {{ font: inherit; font-weight: 600; padding: .5rem 1.5rem; margin-top: 1.5rem; }}
-  [role=status], [role=alert] {{ padding: .75rem 1rem; border-left: 4px solid; }}
-  [role=status] {{ border-color: #2e7d32; }}
-  [role=alert] {{ border-color: #c62828; }}
-</style>
+<link rel="icon" href="data:image/svg+xml,%3Csvg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 16 16'%3E%3Ccircle cx='8' cy='8' r='7.5' fill='%230b5c7a'/%3E%3Ccircle cx='8' cy='8' r='3' fill='%23fff'/%3E%3C/svg%3E">
+<style>{style}</style>
 </head>
 <body>
-<h1>Wyze timelapse settings</h1>
+<main>
+<h1>Wyze timelapse</h1>
+<p class="hint">Takes a picture from each camera at the times below and turns them into daily, weekly, monthly
+and yearly videos.</p>
 {message}
 <form method="post">
-  <label for="cameras">Cameras
-    <small>One per line: a short name (lowercase letters, numbers, dashes), a space, then the camera's RTSP address.
-    In the Wyze app it is under the camera's Settings, Advanced Settings, RTSP.
-    Example: front-yard rtsp://user:pass@192.168.1.50:8554/live</small>
-  </label>
-  <textarea id="cameras" name="cameras" rows="4" required spellcheck="false">{cameras}</textarea>
+  <section>
+    <h2>Cameras</h2>
+    <p class="hint">The address is in the Wyze app under the camera's Settings, Advanced Settings, RTSP.
+    To remove a camera, empty both of its boxes.</p>
+    {cameras}
+  </section>
 
-  <label for="times">Snapshot times
-    <small>24-hour HH:MM, separated by commas.</small>
-  </label>
-  <input id="times" name="times" value="{times}" required>
+  <section>
+    <h2>Schedule</h2>
+    <p class="hint">Each mark is one picture. The wide mark is when the videos are built.</p>
+    {day}
+    <label for="times">Picture times</label>
+    <textarea id="times" name="times" rows="2" required spellcheck="false"
+      aria-describedby="times-hint">{times}</textarea>
+    <p class="hint" id="times-hint">24-hour times such as 08:00, separated by commas.</p>
+    <details>
+      <summary>Add evenly spaced times</summary>
+      <div class="fields">
+        <div><label for="from">From</label><input id="from" name="from" type="time"></div>
+        <div><label for="to">To</label><input id="to" name="to" type="time"></div>
+        <div><label for="every">Every (minutes)</label>
+          <input id="every" name="every" type="number" min="5" max="720" value="30"></div>
+      </div>
+      <p class="hint">Saving adds these to the picture times above.</p>
+    </details>
+    <label for="stitch_time">Build videos at</label>
+    <input id="stitch_time" name="stitch_time" type="time" value="{stitch_time}" required
+      aria-describedby="stitch-hint">
+    <p class="hint" id="stitch-hint">Once a day. Pick a time after midnight, when the day's pictures are complete.</p>
+  </section>
 
-  <label for="stitch_time">Video build time
-    <small>When each night's videos are built (24-hour HH:MM). Pick a time after midnight.</small>
-  </label>
-  <input id="stitch_time" name="stitch_time" value="{stitch_time}" required>
+  <section>
+    <h2>Videos</h2>
+    <div class="fields">
+      <div><label for="fps">Pictures per second of video</label>
+        <input id="fps" name="fps" type="number" min="1" max="60" value="{fps}" required></div>
+      <div><label for="jpeg_quality">Picture quality (1 to 100)</label>
+        <input id="jpeg_quality" name="jpeg_quality" type="number" min="1" max="100" value="{jpeg_quality}" required></div>
+    </div>
+    <p class="hint">{lengths} Higher quality is sharper and takes more space.</p>
+  </section>
 
-  <label for="fps">Frames per second
-    <small>How many snapshots play per second of video.</small>
-  </label>
-  <input id="fps" name="fps" type="number" min="1" max="60" value="{fps}" required>
-
-  <label for="jpeg_quality">Snapshot JPEG quality
-    <small>1 to 100. Higher is sharper and larger.</small>
-  </label>
-  <input id="jpeg_quality" name="jpeg_quality" type="number" min="1" max="100" value="{jpeg_quality}" required>
-
-  <button>Save</button>
+  <section class="actions">
+    <button>Save settings</button>
+    <button class="quiet" name="action" value="test">Test cameras</button>
+    <p class="hint">A test takes up to 20 seconds and saves nothing.</p>
+  </section>
 </form>
+</main>
 </body>
 </html>
 """
 
-
-def from_form(form):
-    def number(key):
-        value = form.get(key, [""])[0].strip()
-        return int(value) if value.isdigit() else value
-
-    cameras = []
-    for line in form.get("cameras", [""])[0].splitlines():
-        if line.strip():
-            name, _, url = line.strip().partition(" ")
-            cameras.append({"name": name, "url": url.strip()})
-    return {
-        "cameras": cameras,
-        "times": [t.strip() for t in form.get("times", [""])[0].split(",") if t.strip()],
-        "stitch_time": form.get("stitch_time", [""])[0].strip(),
-        "fps": number("fps"),
-        "jpeg_quality": number("jpeg_quality"),
-    }
+HEADERS = {
+    "Cache-Control": "no-store",  # the page and the pictures are private to this machine
+    "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; form-action 'self'; base-uri 'none'; "
+                               "frame-ancestors 'none'; style-src 'sha256-"
+                               + base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode() + "'",
+    "Cross-Origin-Resource-Policy": "same-origin",
+    # same-origin, not no-referrer: that one makes browsers post "Origin: null", which the CSRF guard refuses
+    "Referrer-Policy": "same-origin",
+    "X-Content-Type-Options": "nosniff",
+}
 
 
-def render(cfg, message=""):
+def mask(url):
+    """The address with its password hidden: rtsp://user:secret@host -> rtsp://user:••••@host"""
+    return re.sub(r"(//[^/\s:]*):[^/\s]*@", rf"\1:{MASK}@", url)
+
+
+def latest(cam):
+    """Newest saved picture of a camera, or None. `cam` comes from the request, so it is checked before it is a path."""
+    if NAME.fullmatch(cam):
+        for day in sorted((IMAGES / cam).glob("????-??-??"), reverse=True):
+            shots = sorted(day.glob(f"{cam}_*.jpg"))
+            if shots:
+                return shots[-1]
+
+
+def try_camera(cam):
+    """Grab one live frame and return what to show in the camera's picture slot."""
+    if not URL.fullmatch(cam["url"]) or MASK in cam["url"]:
+        return '<p class="empty bad">Fill in the whole address first.</p>'
+    try:
+        frame = grab_frame(cam["url"], 80, timeout=8)
+    except GrabError as e:
+        reason = str(e)
+        hint = ("The camera did not accept the user name or password." if "401" in reason else
+                "Nothing answered at that address. Check it, and that the camera is switched on."
+                if re.search("refused|no route|unreachable|timed out|no frame within", reason, re.I) else
+                "The camera answered but sent no picture.")
+        return f'<p class="empty bad">{hint}</p><figcaption>{html.escape(reason.splitlines()[-1][-160:])}</figcaption>'
+    return (f'<img src="data:image/jpeg;base64,{base64.b64encode(frame).decode()}" '
+            f'alt="Live picture from {html.escape(cam["name"])}">'
+            '<figcaption class="ok">Connected. This is what the camera sees now.</figcaption>')
+
+
+def camera_rows(cameras, secret, tests):
+    rows = []
+    for i, cam in enumerate([*cameras, {"name": "", "url": ""}]):
+        name, shot = html.escape(cam["name"]), latest(cam["name"])
+        if tests and i < len(tests):
+            picture = tests[i]
+        elif shot:
+            taken = shot.stem[len(cam["name"]) + 1:]  # 2026-11-05_08-00-03
+            picture = (f'<img src="/snapshot/{name}" alt="Latest picture from {name}"><figcaption>Latest picture: '
+                       f'{html.escape(taken[:10])} at {html.escape(taken[11:16].replace("-", ":"))}</figcaption>')
+        elif i < len(cameras):
+            picture = '<p class="empty hint">No picture yet. Test cameras shows whether the address works.</p>'
+        else:
+            picture = '<p class="empty hint">Fill in both boxes to add a camera.</p>'
+        # A saved address is shown with its password hidden; one typed in this request is shown back as typed.
+        url = html.escape(mask(cam["url"]) if cam["url"] in secret else cam["url"])
+        rows.append(f"""<fieldset class="camera">
+      <legend>{name or "Add a camera"}</legend>
+      <div class="row">
+        <figure>{picture}</figure>
+        <div>
+          <label for="name-{i}">Name</label>
+          <input id="name-{i}" name="name" value="{name}" placeholder="front-yard" maxlength="32"
+            pattern="[a-z0-9][a-z0-9_\\-]*" title="Lowercase letters, numbers, dashes and underscores"
+            autocomplete="off" autocapitalize="none" spellcheck="false">
+          <label for="url-{i}">Address</label>
+          <input id="url-{i}" name="url" value="{url}" placeholder="rtsp://user:password@192.168.1.50/live"
+            autocomplete="off" autocapitalize="none" spellcheck="false">
+        </div>
+      </div>
+    </fieldset>""")
+    return "\n    ".join(rows)
+
+
+def day_strip(cfg):
+    """The schedule on a 24-hour bar: a sky band for orientation, one tick per picture, a wide tick for the build."""
+    def minute(t):
+        return int(t[:2]) * 60 + int(t[3:])
+
+    times = [t for t in cfg["times"] if HHMM.fullmatch(t)]
+    build = cfg["stitch_time"] if HHMM.fullmatch(cfg["stitch_time"]) else ""
+    ticks = "".join(f'<line x1="{minute(t)}" x2="{minute(t)}" y1="18" y2="44"/>' for t in times)
+    if build:
+        ticks += f'<line class="build" x1="{minute(build)}" x2="{minute(build)}" y1="0" y2="44"/>'
+    stops = "".join(f'<stop offset="{at}" stop-color="{colour}"/>' for at, colour in (
+        (0, "#1d2b4f"), (.2, "#1d2b4f"), (.27, "#e9a15b"), (.35, "#9ccbea"), (.65, "#9ccbea"), (.75, "#e08a5b"),
+        (.83, "#1d2b4f"), (1, "#1d2b4f")))
+    label = f"Pictures at {', '.join(times) or 'no times yet'}." + (f" Videos are built at {build}." if build else "")
+    return (f'<svg class="day" viewBox="0 0 1440 44" preserveAspectRatio="none" role="img" aria-label="{label}">'
+            f'<defs><linearGradient id="sky">{stops}</linearGradient></defs>'
+            f'<rect width="1440" height="12" fill="url(#sky)"/>{ticks}</svg>'
+            '<div class="hours" aria-hidden="true"><span>00:00</span><span>06:00</span><span>12:00</span>'
+            '<span>18:00</span><span>24:00</span></div>')
+
+
+def lengths(cfg):
+    """How long the videos come out with these settings, so a too-short result is visible before a month goes by."""
+    n, fps = len(cfg["times"]), cfg.get("fps")
+    if not n or type(fps) is not int or fps < 1:
+        return ""
+
+    def span(days):
+        s = days * n / fps
+        return f"{s:.1f} seconds" if s < 10 else f"{s:.0f} seconds" if s < 90 else f"{s / 60:.1f} minutes"
+
+    return (f"With {n} picture{'s' * (n != 1)} a day, a day's video plays for {span(1)}, "
+            f"a month's for about {span(30)} and a year's for about {span(365)}.")
+
+
+def render(cfg, message="", saved=None, tests=None):
+    """The page for a well-formed config. `saved` is the stored camera list when `cfg` is not it (a rejected or
+    test submission); `tests` holds one picture slot per camera after Test cameras."""
+    secret = {c["url"] for c in (cfg["cameras"] if saved is None else saved)}
     return PAGE.format(
+        style=STYLE,
         message=message,
-        cameras=html.escape("\n".join(f"{c.get('name', '')} {c.get('url', '')}" for c in cfg.get("cameras", []))),
-        times=html.escape(", ".join(cfg.get("times", []))),
-        stitch_time=html.escape(str(cfg.get("stitch_time", ""))),
+        cameras=camera_rows(cfg["cameras"], secret, tests),
+        day=day_strip(cfg),
+        times=html.escape(", ".join(cfg["times"])),
+        stitch_time=html.escape(cfg["stitch_time"]),
         fps=html.escape(str(cfg.get("fps", ""))),
         jpeg_quality=html.escape(str(cfg.get("jpeg_quality", ""))),
+        lengths=lengths(cfg),
     )
 
 
+def from_form(form, saved=()):
+    """(config, problems) from a posted form. `saved` is the stored camera list: an address that comes back
+    still masked gets its stored password, and only for that exact address."""
+    def field(key):
+        return form.get(key, [""])[0].strip()
+
+    def number(key):
+        return int(field(key)) if field(key).isdecimal() else field(key)
+
+    errors = []
+    stored = {mask(c["url"]): c["url"] for c in saved}
+    cameras = [{"name": name.strip(), "url": stored.get(url.strip(), url.strip())}
+               for name, url in zip(form.get("name", []), form.get("url", [])) if name.strip() or url.strip()]
+    for c in cameras:
+        if MASK in c["url"]:
+            errors.append(f"camera {c['name']!r}: type the password again in place of {MASK}")
+
+    times = [t for t in re.split(r"[,\s]+", field("times")) if t]
+    start, end, every = field("from"), field("to"), field("every")
+    if start or end:
+        if HHMM.fullmatch(start) and HHMM.fullmatch(end) and start <= end and every.isdecimal() and int(every) >= 5:
+            a, b = (int(t[:2]) * 60 + int(t[3:]) for t in (start, end))
+            times = sorted({*times, *(f"{m // 60:02}:{m % 60:02}" for m in range(a, b + 1, int(every)))})
+        else:
+            errors.append("evenly spaced times: fill in From, a later To, and Every as 5 minutes or more")
+    return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"), "fps": number("fps"),
+            "jpeg_quality": number("jpeg_quality")}, errors
+
+
+def load():
+    """(stored config, warning for the page). A file the page cannot show is replaced by the example settings."""
+    try:
+        cfg = read_config()
+        if well_formed(cfg):
+            return cfg, ""
+    except (OSError, ValueError):
+        pass
+    return (json.loads(CONFIG.with_name("config.example.json").read_text()),
+            '<div role="alert">config.json could not be read, so these are the example settings. '
+            'Saving replaces the file.</div>')
+
+
 class Handler(BaseHTTPRequestHandler):
-    def reply(self, status, body):
-        data = body.encode()
+    timeout = 30  # a stalled client must not hold a thread forever
+
+    def reply(self, status, body=b"", kind="text/html; charset=utf-8", location=None):
+        data = body if isinstance(body, bytes) else body.encode()
         self.send_response(status)
-        self.send_header("Content-Type", "text/html; charset=utf-8")
+        for name, value in HEADERS.items():
+            self.send_header(name, value)
+        if location:
+            self.send_header("Location", location)
+        self.send_header("Content-Type", kind)
         self.send_header("Content-Length", str(len(data)))
         self.end_headers()
         self.wfile.write(data)
 
-    def allowed(self):
-        # DNS-rebinding guard: the page shows camera passwords, so only answer when addressed as this machine.
-        if self.headers.get("Host", "").rsplit(":", 1)[0] not in ("localhost", "127.0.0.1") or self.path != "/":
-            self.send_error(404)
-            return False
-        return True
+    def route(self):
+        """The request path, or None once a request that is not addressed to this machine has been answered.
+        DNS-rebinding guard: the page can reach the cameras, so it only answers as localhost."""
+        if self.headers.get("Host", "").rsplit(":", 1)[0] not in ("localhost", "127.0.0.1"):
+            return self.send_error(404)
+        return urlsplit(self.path).path
 
     def do_GET(self):
-        if self.allowed():
-            self.reply(200, render(read_config()))
+        path = self.route()
+        if path == "/":
+            cfg, message = load()
+            if not message and urlsplit(self.path).query == "saved":
+                message = '<div role="status">Settings saved. The schedule updates within a few seconds.</div>'
+            self.reply(200, render(cfg, message))
+        elif path and path.startswith("/snapshot/") and (shot := latest(path[len("/snapshot/"):])):
+            self.reply(200, shot.read_bytes(), "image/jpeg")
+        elif path:
+            self.send_error(404)
 
     def do_POST(self):
-        if not self.allowed():
-            return
+        path = self.route()
+        if path != "/":
+            return path and self.send_error(404)
         # CSRF guard: another site open in the same browser must not be able to rewrite the config.
         if self.headers.get("Origin") != f"http://{self.headers.get('Host')}":
             return self.send_error(403)
-        length = int(self.headers.get("Content-Length") or 0)
-        if length > 65536:
+        length = self.headers.get("Content-Length", "")
+        if not length.isdecimal():
+            return self.send_error(400)
+        if int(length) > 65536:
             return self.send_error(413)
-        cfg = from_form(parse_qs(self.rfile.read(length).decode("utf-8", "replace")))
-        errors = validate(cfg)
+        form = parse_qs(self.rfile.read(int(length)).decode("utf-8", "replace"), keep_blank_values=True)
+        stored = load()[0]["cameras"]
+        cfg, errors = from_form(form, stored)
+        if form.get("action") == ["test"]:
+            with ThreadPoolExecutor() as pool:
+                tests = list(pool.map(try_camera, cfg["cameras"]))
+            return self.reply(200, render(cfg, '<div role="status">Test finished. Nothing was saved.</div>',
+                                          stored, tests))
+        errors += validate(cfg)
+        if not errors:
+            try:
+                tmp = CONFIG.with_suffix(".tmp")
+                tmp.write_text(json.dumps(cfg, indent=2) + "\n")
+                os.replace(tmp, CONFIG)
+            except OSError as e:
+                errors = [f"the settings file could not be written ({e.strerror})"]
         if errors:
             items = "".join(f"<li>{html.escape(e)}</li>" for e in errors)
-            return self.reply(400, render(cfg, f'<div role="alert">Not saved:<ul>{items}</ul></div>'))
-        tmp = CONFIG.with_suffix(".tmp")
-        tmp.write_text(json.dumps(cfg, indent=2) + "\n")
-        os.replace(tmp, CONFIG)
-        self.reply(200, render(cfg, '<div role="status">Saved. The schedule updates itself within a few seconds.</div>'))
+            return self.reply(400, render(cfg, f'<div role="alert">Not saved:<ul>{items}</ul></div>', stored))
+        self.reply(303, location="/?saved")  # redirect, so a refresh does not post the form again
 
 
 if __name__ == "__main__":
+    os.umask(0o077)  # config.json holds camera passwords: readable by its owner only
     ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

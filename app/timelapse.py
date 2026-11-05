@@ -24,6 +24,7 @@ IMAGES, VIDEOS = Path("/images"), Path("/videos")
 LEVELS = ["daily", "weekly", "monthly", "yearly"]
 HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
+URL = re.compile(r"rtsps?://\S+")
 
 
 def read_config():
@@ -31,27 +32,37 @@ def read_config():
     return json.loads(path.read_text())
 
 
+def well_formed(cfg):
+    """True when every setting is the right kind of value, so validate() and the settings page can read it."""
+    return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str)
+            and isinstance(cfg.get("cameras"), list) and isinstance(cfg.get("times"), list)
+            and all(isinstance(c, dict) and isinstance(c.get("name"), str) and isinstance(c.get("url"), str)
+                    for c in cfg["cameras"])
+            and all(isinstance(t, str) for t in cfg["times"]))
+
+
 def validate(cfg):
-    """Problems with a config dict (empty list = valid). Camera names become directory names, so they are strict."""
+    """Problems with a config (empty list = valid). Camera names become directory names, so they are strict."""
+    if not well_formed(cfg):  # a hand-edited file can hold anything
+        return ["a setting is missing or the wrong kind of value; compare config.json with config.example.json"]
     errs = []
-    cams = cfg.get("cameras") or []
-    names = [c.get("name", "") for c in cams]
+    cams, times = cfg["cameras"], cfg["times"]
+    names = [c["name"] for c in cams]
     if not cams:
         errs.append("at least one camera is required")
     if len(set(names)) != len(names):
         errs.append("camera names must be unique")
     for c in cams:
-        if not NAME.fullmatch(c.get("name", "")):
-            errs.append(f"camera name {c.get('name')!r}: use a-z, 0-9, - and _ (max 32 characters)")
-        if not re.fullmatch(r"rtsps?://\S+", c.get("url", "")):
-            errs.append(f"camera {c.get('name')!r}: URL must look like rtsp://address:port/path")
-    times = cfg.get("times") or []
+        if not NAME.fullmatch(c["name"]):
+            errs.append(f"camera name {c['name']!r}: use a-z, 0-9, - and _ (max 32 characters)")
+        if not URL.fullmatch(c["url"]):
+            errs.append(f"camera {c['name']!r}: address must look like rtsp://address:port/path")
     if not times or len(set(times)) != len(times) or not all(HHMM.fullmatch(t) for t in times):
         errs.append("snapshot times: one or more different 24-hour HH:MM values")
-    if not HHMM.fullmatch(cfg.get("stitch_time", "")):
-        errs.append("stitch time: a 24-hour HH:MM value")
+    if not HHMM.fullmatch(cfg["stitch_time"]):
+        errs.append("video build time: a 24-hour HH:MM value")
     for key, lo, hi in (("fps", 1, 60), ("jpeg_quality", 1, 100)):
-        if not (isinstance(cfg.get(key), int) and lo <= cfg[key] <= hi):
+        if not (type(cfg.get(key)) is int and lo <= cfg[key] <= hi):
             errs.append(f"{key}: a whole number from {lo} to {hi}")
     return errs
 
@@ -186,7 +197,14 @@ def build(parts, out, fps, title):
         r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", *source, *meta], capture_output=True, text=True)
     try:
         if r.returncode or r.stderr.strip():
-            raise RuntimeError(f"ffmpeg failed building {out.name}: {r.stderr.strip()[-300:]}")
+            why = r.stderr.strip()[-300:]
+            for p in parts:  # name the damaged file, so the person reading the alert knows what to delete
+                try:
+                    probe(p)
+                except ValueError as e:
+                    why = str(e)
+                    break
+            raise RuntimeError(f"ffmpeg failed building {out.name}: {why}")
         frames = probe(part)["nb_read_frames"]
         if frames != expected:
             raise RuntimeError(f"{out.name} has {frames} frames, expected {expected}")
@@ -231,8 +249,11 @@ if __name__ == "__main__":
     job = sys.argv[1] if len(sys.argv) > 1 else ""
     if job not in ("grab", "stitch"):
         sys.exit("usage: timelapse.py grab|stitch")
-    cfg = read_config()
-    problems = [f"config: {e}" for e in validate(cfg)]
+    try:
+        cfg = read_config()
+        problems = [f"config: {e}" for e in validate(cfg)]
+    except (OSError, ValueError) as e:  # unreadable or not JSON
+        problems = [f"config: config.json could not be read: {e}"]
     if not problems:
         problems = grab(cfg) if job == "grab" else stitch(cfg, date.today())
     for p in problems:

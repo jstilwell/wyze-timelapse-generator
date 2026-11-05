@@ -1,9 +1,13 @@
 """Run inside the image: docker compose run --rm --entrypoint python stitch -m unittest discover -s /app -v"""
+import http.client
+import json
 import subprocess
 import tempfile
+import threading
 import unittest
 from datetime import date, timedelta
 from pathlib import Path
+from urllib.parse import urlencode
 
 import piexif
 
@@ -50,14 +54,163 @@ class Config(unittest.TestCase):
                        {"cameras": [{"name": "cam1", "url": "http://x/live"}]},
                        {"cameras": GOOD["cameras"] * 2},
                        {"times": ["8:00"]}, {"times": ["25:00"]}, {"times": []},
-                       {"stitch_time": "nope"}, {"fps": 0}, {"fps": "24"}, {"jpeg_quality": 101}):
+                       {"stitch_time": "nope"}, {"fps": 0}, {"fps": "24"}, {"fps": True}, {"jpeg_quality": 101}):
             self.assertTrue(t.validate({**GOOD, **change}), change)
 
-    def test_form_round_trip(self):
-        form = {"cameras": ["cam1 rtsp://10.0.0.5:8554/live\n"], "times": ["08:00, 12:00"], "stitch_time": ["00:30"],
-                "fps": ["24"], "jpeg_quality": ["95"]}
-        self.assertEqual(web.from_form(form), GOOD)
-        self.assertIn("&lt;script&gt;", web.render({**GOOD, "stitch_time": "<script>"}))
+    def test_hand_edited_nonsense_is_a_problem_not_a_crash(self):
+        for cfg in ([], "x", {}, {**GOOD, "cameras": "cam1"}, {**GOOD, "cameras": [5]},
+                    {**GOOD, "cameras": [{"name": 5, "url": None}]}, {**GOOD, "times": [8]}, {**GOOD, "times": None},
+                    {**GOOD, "stitch_time": 30}):
+            self.assertEqual(len(t.validate(cfg)), 1, cfg)
+
+
+SECRET = "rtsp://admin:hunter2@10.0.0.5/live"
+FORM = {"name": ["cam1", ""], "url": ["rtsp://10.0.0.5:8554/live", ""], "times": ["08:00, 12:00"],
+        "stitch_time": ["00:30"], "fps": ["24"], "jpeg_quality": ["95"]}
+
+
+class Form(unittest.TestCase):
+    def test_round_trip_and_escaping(self):
+        self.assertEqual(web.from_form(FORM), (GOOD, []))
+        page = web.render({**GOOD, "stitch_time": "<script>", "cameras": [{"name": "<b>", "url": '"><i>'}]})
+        self.assertNotIn("<script>", page)
+        self.assertNotIn("<b>", page)
+        self.assertNotIn("<i>", page)
+
+    def test_saved_password_is_never_shown_and_survives_a_save(self):
+        saved = [{"name": "cam1", "url": SECRET}]
+        page = web.render({**GOOD, "cameras": saved})
+        self.assertNotIn("hunter2", page)
+        self.assertIn(web.mask(SECRET), page)
+        # the masked address comes back unchanged: the stored password is kept
+        cfg, errors = web.from_form({**FORM, "url": [web.mask(SECRET), ""]}, saved)
+        self.assertEqual((cfg["cameras"], errors), (saved, []))
+        # a different host with the mask must not receive the stored password
+        cfg, errors = web.from_form({**FORM, "url": [web.mask(SECRET).replace("10.0.0.5", "evil.example"), ""]}, saved)
+        self.assertNotIn("hunter2", json.dumps(cfg))
+        self.assertEqual(len(errors), 1)
+        # a password typed in a rejected submission is shown back, so it does not have to be typed twice
+        typed = {**GOOD, "cameras": [{"name": "cam2", "url": "rtsp://a:new@10.0.0.6/live"}]}
+        self.assertIn("a:new@", web.render(typed, saved=saved))
+
+    def test_mask(self):
+        for url, shown in ((SECRET, "rtsp://admin:••••@10.0.0.5/live"),
+                           ("rtsp://u:p@ss@h:554/live", "rtsp://u:••••@h:554/live"),
+                           ("rtsp://10.0.0.5:8554/live", "rtsp://10.0.0.5:8554/live"),
+                           ("rtsp://user@host/live", "rtsp://user@host/live")):
+            self.assertEqual(web.mask(url), shown)
+
+    def test_evenly_spaced_times(self):
+        cfg, errors = web.from_form({**FORM, "from": ["07:00"], "to": ["09:00"], "every": ["45"]})
+        self.assertEqual((cfg["times"], errors), (["07:00", "07:45", "08:00", "08:30", "12:00"], []))
+        for bad in ({"from": ["09:00"], "to": ["07:00"]}, {"from": ["07:00"]}, {"from": ["07:00"], "to": ["09:00"],
+                    "every": ["1"]}, {"from": ["x"], "to": ["09:00"]}):
+            self.assertEqual(len(web.from_form({**FORM, "every": ["30"], **bad})[1]), 1, bad)
+
+    def test_video_lengths(self):
+        self.assertIn("0.1 seconds", web.lengths({**GOOD, "times": ["08:00", "12:00", "16:00"]}))
+        self.assertIn("a year's for about 15.2 minutes", web.lengths({**GOOD, "times": ["08:00"] * 60}))
+        self.assertEqual(web.lengths({**GOOD, "fps": "x"}), "")
+
+
+class Server(unittest.TestCase):
+    """The real handler on a real socket, with the config and image folders pointed at a temp directory."""
+
+    def setUp(self):
+        self.tmp = tempfile.TemporaryDirectory()
+        self.addCleanup(self.tmp.cleanup)
+        root = Path(self.tmp.name)
+        self.config, images = root / "config" / "config.json", root / "images"
+        self.config.parent.mkdir()
+        (self.config.parent / "config.example.json").write_text(json.dumps(GOOD))
+        self.config.write_text(json.dumps({**GOOD, "cameras": [{"name": "cam1", "url": SECRET}]}))
+        self.shot = images / "cam1" / "2026-11-05" / "cam1_2026-11-05_08-00-03.jpg"
+        self.shot.parent.mkdir(parents=True)
+        self.shot.write_bytes(b"jpeg bytes")
+        (images / "secret.txt").write_text("not a snapshot")
+        old = t.CONFIG, web.CONFIG, web.IMAGES
+        t.CONFIG = web.CONFIG = self.config
+        web.IMAGES = images
+        self.addCleanup(lambda: (setattr(t, "CONFIG", old[0]), setattr(web, "CONFIG", old[1]),
+                                 setattr(web, "IMAGES", old[2])))
+        web.Handler.log_message = lambda *a: None
+        self.server = web.ThreadingHTTPServer(("127.0.0.1", 0), web.Handler)
+        threading.Thread(target=self.server.serve_forever, daemon=True).start()
+        self.addCleanup(self.server.server_close)
+        self.addCleanup(self.server.shutdown)
+        self.host = f"localhost:{self.server.server_port}"
+
+    def ask(self, method, path, form=None, **headers):
+        conn = http.client.HTTPConnection("127.0.0.1", self.server.server_port, timeout=10)
+        self.addCleanup(conn.close)
+        headers = {"Host": self.host, "Origin": f"http://{self.host}", **headers}
+        conn.request(method, path, urlencode(form, doseq=True) if form else None, headers)
+        r = conn.getresponse()
+        return r.status, r.read(), r
+
+    def test_page_shows_the_latest_picture_and_no_password(self):
+        status, body, r = self.ask("GET", "/")
+        self.assertEqual(status, 200)
+        self.assertNotIn(b"hunter2", body)
+        self.assertIn(b"Latest picture: 2026-11-05 at 08:00", body)
+        self.assertEqual(r.getheader("Cache-Control"), "no-store")
+        self.assertIn("frame-ancestors 'none'", r.getheader("Content-Security-Policy"))
+        self.assertEqual(self.ask("GET", "/snapshot/cam1")[:2], (200, b"jpeg bytes"))
+
+    def test_only_snapshots_are_served(self):
+        for path in ("/snapshot/nope", "/snapshot/..", "/snapshot/../secret.txt", "/snapshot/%2e%2e/secret.txt",
+                     "/snapshot/cam1/../../secret.txt", "/config/config.json", "/other"):
+            self.assertEqual(self.ask("GET", path)[0], 404, path)
+
+    def test_requests_from_other_sites_are_refused(self):
+        self.assertEqual(self.ask("GET", "/", Host="evil.example")[0], 404)  # DNS rebinding
+        self.assertEqual(self.ask("GET", "/snapshot/cam1", Host="evil.example")[0], 404)
+        before = self.config.read_text()
+        self.assertEqual(self.ask("POST", "/", FORM, Origin="http://evil.example")[0], 403)  # CSRF
+        self.assertEqual(self.ask("POST", "/", FORM, Host="evil.example", Origin="http://evil.example")[0], 404)
+        self.assertEqual(self.config.read_text(), before)
+
+    def test_save_keeps_the_masked_password_and_redirects(self):
+        status, _, r = self.ask("POST", "/", {**FORM, "url": [web.mask(SECRET), ""], "fps": ["12"]})
+        self.assertEqual((status, r.getheader("Location")), (303, "/?saved"))
+        saved = json.loads(self.config.read_text())
+        self.assertEqual((saved["cameras"][0]["url"], saved["fps"]), (SECRET, 12))
+        self.assertIn(b"Settings saved", self.ask("GET", "/?saved")[1])
+
+    def test_rejected_save_changes_nothing_and_says_why(self):
+        before = self.config.read_text()
+        status, body, _ = self.ask("POST", "/", {**FORM, "times": ["25:00"]})
+        self.assertEqual(status, 400)
+        self.assertIn(b"Not saved", body)
+        self.assertEqual(self.config.read_text(), before)
+        self.assertEqual(self.ask("POST", "/", FORM, **{"Content-Length": "x"})[0], 400)
+
+    def test_unreadable_config_still_gives_a_usable_page(self):
+        for junk in ("{not json", "[1, 2]", json.dumps({**GOOD, "cameras": [7]})):
+            self.config.write_text(junk)
+            status, body, _ = self.ask("GET", "/")
+            self.assertEqual(status, 200, junk)
+            self.assertIn(b"could not be read", body)
+
+    def test_camera_test_reports_failure_without_saving_or_leaking(self):
+        before = self.config.read_text()
+        form = {**FORM, "name": ["cam1", "cam2"], "url": ["rtsp://admin:hunter2@127.0.0.1:1/live", "nonsense"],
+                "action": ["test"]}
+        status, body, _ = self.ask("POST", "/", form)
+        self.assertEqual(status, 200)
+        self.assertIn(b"Nothing answered at that address", body)
+        self.assertIn(b"Fill in the whole address first", body)
+        self.assertNotIn(b"hunter2", body.replace(b'value="rtsp://admin:hunter2@', b""))  # only where it was typed
+        self.assertEqual(self.config.read_text(), before)
+
+    def test_camera_test_shows_the_live_picture(self):
+        old = web.grab_frame
+        self.addCleanup(lambda: setattr(web, "grab_frame", old))
+        web.grab_frame = lambda url, quality, timeout: b"frame" if url == SECRET else self.fail(url)
+        # the saved address comes back masked, and the test still reaches the camera with the stored password
+        body = self.ask("POST", "/", {**FORM, "url": [web.mask(SECRET), ""], "action": ["test"]})[1]
+        self.assertIn(b'src="data:image/jpeg;base64,ZnJhbWU="', body)
+        self.assertNotIn(b"hunter2", body)
 
 
 class Media(unittest.TestCase):
@@ -135,6 +288,7 @@ class Media(unittest.TestCase):
         problems = t.stitch({**GOOD, "times": ["08:00"]}, date(2026, 2, 2), self.images, self.videos)
         self.assertEqual(len(problems), 2, problems)
         self.assertIn("cam1_2026-01-06.mp4", problems[0])
+        self.assertIn(f"{bad.name} is corrupt", problems[0])  # names the file to delete
         self.assertFalse((self.videos / "cam1" / "weekly").exists())
         self.assertEqual(list(self.videos.rglob("*.part")), [])
 
