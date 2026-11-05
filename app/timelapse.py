@@ -63,8 +63,8 @@ ALERT_FIELDS = {
     "telegram_chat": (r"-?[0-9]+|@\w+", "Telegram: the chat id is a number, or @ and a channel name"),
     "pushover_token": (r"[A-Za-z0-9]+", "Pushover: the app token is letters and numbers only"),
     "pushover_user": (r"[A-Za-z0-9]+", "Pushover: the user key is letters and numbers only"),
-    "email_provider": (r"resend|cloudflare", "Email: choose Off, Resend or Cloudflare"),
-    "email_key": (r"[\w.-]+", "Email: the API key has a character no key has; paste it again"),
+    "email_provider": (r"resend|cloudflare|gmail", "Email: choose Off, Resend, Cloudflare or Gmail"),
+    "email_key": (r"[\w.-]+", "Email: the key has a character no key has; paste it again"),
     "email_account": (r"[0-9a-f]{32}", "Email: a Cloudflare account id is 32 letters and numbers"),
     "email_from": (EMAIL, "Email: the from address must look like alerts@example.com"),
     "email_to": (EMAIL, "Email: the to address must look like you@example.com"),
@@ -120,7 +120,7 @@ def alert_problems(alerts):
         if any(alerts[key] for key in pair) and not all(alerts[key] for key in pair):
             errs.append(text)
     if alerts["email_provider"] and not all(alerts[key] for key in ("email_key", "email_from", "email_to")):
-        errs.append("Email needs the API key, the from address and the to address")
+        errs.append("Email needs the key, the from address and the to address")
     elif alerts["email_provider"] == "cloudflare" and not alerts["email_account"]:
         errs.append("Email through Cloudflare also needs the account id")
     return errs

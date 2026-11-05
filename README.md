@@ -93,6 +93,7 @@ Edit `.env` with `open -e .env`. No need to run anything afterwards.
 | [Pushover](https://pushover.net) | Your user key, and the token of an application you create there. |
 | Email through [Resend](https://resend.com) | An API key, a from address on a domain you verified there, and a to address. |
 | Email through [Cloudflare](https://developers.cloudflare.com/email-service/) | An API token that may send email, your account id, a from address on a domain set up for Email Sending, and a to address. |
+| Email through Gmail | An [app password](https://myaccount.google.com/apppasswords), your Gmail address as the from address, and a to address. App passwords need 2-Step Verification, and work and school accounts cannot make them. |
 
 Saved keys show as `••••`. Leave that as it is to keep a key, or empty the box to remove it. If you change the email
 provider, type the new provider's key.

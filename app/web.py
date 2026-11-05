@@ -455,7 +455,7 @@ ALERT_BOXES = {
     "ntfy": {"ntfy_url": ("Topic address", "https://ntfy.sh/a-long-private-name")},
     "Telegram": {"telegram_token": ("Bot token", "123456:ABC-def"), "telegram_chat": ("Chat id", "123456789")},
     "Pushover": {"pushover_token": ("App token", ""), "pushover_user": ("User key", "")},
-    "Email": {"email_key": ("API key", ""), "email_account": ("Cloudflare account id", "Cloudflare only"),
+    "Email": {"email_key": ("API key or app password", ""), "email_account": ("Cloudflare account id", "Cloudflare only"),
               "email_from": ("From", "alerts@example.com"), "email_to": ("To", "you@example.com")},
 }
 
@@ -470,7 +470,8 @@ def alert_controls(alerts, saved):
     provider = ('<div><label for="email_provider">Send through</label><select id="email_provider" '
                 'name="email_provider">' + "".join(
                     f'<option value="{value}"{" selected" * (alerts["email_provider"] == value)}>{text}</option>'
-                    for value, text in (("", "Off"), ("resend", "Resend"), ("cloudflare", "Cloudflare"))) +
+                    for value, text in (("", "Off"), ("resend", "Resend"), ("cloudflare", "Cloudflare"),
+                                        ("gmail", "Gmail"))) +
                 "</select></div>")
     return "\n    ".join(
         f'<fieldset class="level"><legend>{name}</legend><div class="fields wide">'
@@ -582,9 +583,11 @@ def from_form(form, saved=(), alerts=ALERTS):
     video = ({key: field(key) for key in CHOICES} | {key: key in form for key in SWITCHES}
              | {key: number(key) for key in RANGES})
     wanted = {key: alerts[key] if key in ALERT_SECRETS and field(key) == MASK else field(key) for key in ALERT_FIELDS}
+    if wanted["email_provider"] == "gmail":  # Google shows an app password in groups of four
+        wanted["email_key"] = wanted["email_key"].replace(" ", "")
     # A key belongs to one provider. Kept for another, every alert by email would quietly fail.
     if field("email_key") == MASK and wanted["email_provider"] not in ("", alerts["email_provider"]):
-        errors.append("Email: type the API key of the new provider")
+        errors.append("Email: type the key of the new provider")
     return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"),
             "jpeg_quality": number("jpeg_quality"), "levels": levels, "video": video,
             "check_view": "check_view" in form, "view_notes": field("view_notes"),

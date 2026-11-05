@@ -49,8 +49,21 @@ notify() {
 data-urlencode = \"token=$app\"
 data-urlencode = \"user=$user\"" --data-urlencode "title=$title" --data-urlencode "message=$1"
 
-  local provider=$(alert email_provider)
+  local provider=$(alert email_provider) from=$(alert email_from) to=$(alert email_to)
   [[ -n $provider ]] || return 0
+  if [[ $provider == gmail ]]; then
+    # =(...) because stdin carries the curl config. --crlf: mail lines end that way.
+    send "gmail email" "url = \"smtps://smtp.gmail.com:465\"
+user = \"$from:$(alert email_key)\"" --mail-from "$from" --mail-rcpt "$to" --crlf -T =(print -r -- "From: $from
+To: $to
+Subject: $title
+Date: $(LC_ALL=C date '+%a, %d %b %Y %T %z')
+MIME-Version: 1.0
+Content-Type: text/plain; charset=utf-8
+
+$1")
+    return
+  fi
   url=https://api.resend.com/emails
   [[ $provider == cloudflare ]] &&
     url=https://api.cloudflare.com/client/v4/accounts/$(alert email_account)/email/sending/send
@@ -59,7 +72,7 @@ data-urlencode = \"user=$user\"" --data-urlencode "title=$title" --data-urlencod
   send "$provider email" "url = \"$url\"
 header = \"Authorization: Bearer $(alert email_key)\"" -H 'Content-Type: application/json' --data-raw "$(
     osascript -l JavaScript -e 'function run(a) { return JSON.stringify({from: a[0], to: a[1], subject: a[2], text: a[3]}) }' \
-      -- "$(alert email_from)" "$(alert email_to)" "$title" "$1")"
+      -- "$from" "$to" "$title" "$1")"
 }
 
 if [[ $job == test ]]; then
