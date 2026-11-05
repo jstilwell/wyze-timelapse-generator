@@ -4,7 +4,8 @@
 
 (rtsps cameras need their stored certificate, so they are grabbed through timelapse.py or the settings page.)
 
-A rewrite of jcriger/rtsp-grabber (MIT, last updated 2021), which this project started from. What changed:
+A rewrite of jcriger/rtsp-grabber (https://github.com/jcriger/rtsp-grabber, MIT, Copyright (c) 2021 jcriger),
+which this project started from. What changed:
 - ffmpeg does the capture instead of OpenCV, so the only requirement is an ffmpeg binary (no opencv, numpy
   or dateutil). ffmpeg waits for the first keyframe, so the half-decoded grey frames the old
   "first frame OpenCV hands back" approach could save do not happen.

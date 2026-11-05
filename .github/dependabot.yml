@@ -1,4 +1,4 @@
-# Monthly pull requests for the pinned base images, piexif and the CI action. CI runs the self-tests on each.
+# Monthly pull requests for the pinned base images, the Python packages and the CI action. CI runs the self-tests on each.
 version: 2
 updates:
   - package-ecosystem: docker

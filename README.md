@@ -9,7 +9,8 @@ You need a Mac (macOS 12 or newer), [Docker Desktop](https://www.docker.com/prod
 opened once, and a Wyze camera with RTSP turned on (Wyze app: camera Settings, Advanced Settings, RTSP).
 Other cameras with an `rtsp://` or `rtsps://` address work too, UniFi Protect included.
 
-1. Put this folder somewhere it can stay. If you move it later, run step 2 again.
+1. Download this project: on [its GitHub page](https://github.com/jstilwell/wyze-timelapse-generator), press
+   **Code**, then **Download ZIP**. Unzip it somewhere it can stay. If you move it later, run step 2 again.
 2. In Terminal, from this folder, run `./launchd/install.sh`
 3. Open <http://localhost:8080>. Enter each camera's address, press **Test cameras** to see its picture,
    then **Save settings**.
@@ -117,4 +118,9 @@ Everything the tool is built from is pinned to an exact version. On GitHub, Depe
 versions once a month and the self-tests run on each proposal. After pulling an update, run
 `./launchd/install.sh`.
 
-`app/rtsp_grabber.py` is a rewrite of [jcriger/rtsp-grabber](https://github.com/jcriger/rtsp-grabber) (MIT).
+## Credits and license
+
+This project started from [rtsp-grabber](https://github.com/jcriger/rtsp-grabber) by jcriger, and
+`app/rtsp_grabber.py` is a rewrite of it. Thank you, jcriger. Both projects are under the [MIT License](LICENSE).
+
+This is an independent project. It is not made, supported or endorsed by Wyze.
