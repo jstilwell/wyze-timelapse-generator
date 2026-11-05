@@ -31,6 +31,8 @@ it missed.
 ~/Movies/wyze-timelapse/front-yard/yearly/front-yard_2026.mp4
 ```
 
+A picture is named for the time its run started, so every camera's picture from one run has the same time.
+
 To use other folders, such as an external drive: run `open -e .env`, change `IMAGES_PATH` and
 `VIDEOS_PATH` to folders that exist, and run `./launchd/install.sh` again.
 

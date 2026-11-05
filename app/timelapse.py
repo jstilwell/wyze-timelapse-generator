@@ -13,6 +13,7 @@ import subprocess
 import sys
 import tempfile
 import time
+from concurrent.futures import ThreadPoolExecutor
 from datetime import date, datetime, timedelta, timezone
 from pathlib import Path
 
@@ -181,8 +182,11 @@ def frame(grab, cam, quality):
     raise RuntimeError(f"no usable frame after 3 attempts: {error}")
 
 
-def snapshot(grab, cam, quality, images, check=None):
+def snapshot(grab, cam, quality, images, check=None, when=None):
     """Save one picture and return (its path, a note for the alert or None).
+
+    `when` is the moment the run started. The folder and file are named for it, so that a slow camera or a
+    retake cannot push a picture out of a video's time window or into the next day.
 
     `check(jpeg, camera name, usual picture)` says what is blocking the view ("" for nothing). A blocked picture
     is taken again; whatever happens after the first good frame, a picture is saved, and the note says so when
@@ -208,7 +212,8 @@ def snapshot(grab, cam, quality, images, check=None):
             note = f"the view was blocked ({reason}) and the retake failed ({e}); the blocked picture was kept"
             break
 
-    now = datetime.now().astimezone()
+    now = datetime.now().astimezone()  # the EXIF data keeps the moment the picture was really taken
+    when = when or now
     stamp, off = now.strftime("%Y:%m:%d %H:%M:%S"), now.strftime("%z")
     off = f"{off[:3]}:{off[3:]}"
     # The RTSP URL is deliberately left out: it usually carries the camera password.
@@ -233,9 +238,9 @@ def snapshot(grab, cam, quality, images, check=None):
     tagged = io.BytesIO()
     piexif.insert(exif, jpeg, tagged)
 
-    day = images / cam["name"] / f"{now:%Y-%m-%d}"
+    day = images / cam["name"] / f"{when:%Y-%m-%d}"
     day.mkdir(parents=True, exist_ok=True)
-    final = day / f"{cam['name']}_{now:%Y-%m-%d_%H-%M-%S}.jpg"
+    final = day / f"{cam['name']}_{when:%Y-%m-%d_%H-%M-%S}.jpg"
     part = final.with_suffix(".part")
     try:
         part.write_bytes(tagged.getvalue())
@@ -252,6 +257,7 @@ def snapshot(grab, cam, quality, images, check=None):
 
 
 def grab(cfg, images=IMAGES):
+    started = datetime.now().astimezone()
     check = None
     if cfg["check_view"]:
         import view  # the Claude SDK is only loaded when the check is switched on
@@ -259,16 +265,17 @@ def grab(cfg, images=IMAGES):
         def check(jpeg, camera, usual):
             return view.blocked(jpeg, camera, usual if cfg["view_compare"] else None, cfg["view_notes"],
                                 cfg["view_model"])
-    problems = []
-    for cam in cfg["cameras"]:
+
+    def one(cam):
         try:
-            saved, note = snapshot(grab_frame, cam, cfg["jpeg_quality"], images, check)
+            saved, note = snapshot(grab_frame, cam, cfg["jpeg_quality"], images, check, started)
             print("saved", saved)
-            if note:
-                problems.append(f"{cam['name']}: {note}")
+            return note and f"{cam['name']}: {note}"
         except Exception as e:
-            problems.append(f"{cam['name']}: {e}")
-    return problems
+            return f"{cam['name']}: {e}"
+
+    with ThreadPoolExecutor(len(cfg["cameras"])) as pool:  # all at once: a dead camera must not delay the others
+        return [problem for problem in pool.map(one, cfg["cameras"]) if problem]
 
 
 # ---- stitch --------------------------------------------------------------------------------------------------------

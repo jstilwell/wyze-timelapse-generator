@@ -11,7 +11,7 @@ import sys
 import tempfile
 import threading
 import unittest
-from datetime import date, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 from urllib.parse import urlencode
 
@@ -635,6 +635,37 @@ class Media(unittest.TestCase):
             with self.assertRaises(RuntimeError):
                 t.snapshot(lambda url, quality, **pin: frame, GOOD["cameras"][0], 95, self.images)
         self.assertEqual(len(list(self.images.rglob("cam1_*"))), 1)  # nothing bad or half-written left behind
+
+    def test_a_picture_is_filed_under_the_time_its_run_started(self):
+        src = self.images / "src.jpg"
+        jpeg(src)
+        started = datetime(2026, 1, 5, 23, 59, 58).astimezone()
+        out, _ = t.snapshot(lambda url, quality, **pin: src.read_bytes(), GOOD["cameras"][0], 95, self.images,
+                            when=started)
+        self.assertEqual(out, self.images / "cam1" / "2026-01-05" / "cam1_2026-01-05_23-59-58.jpg")
+        taken = piexif.load(str(out))["Exif"][piexif.ExifIFD.DateTimeOriginal].decode()
+        self.assertNotIn("2026:01:05", taken)  # the picture itself keeps the moment it was taken
+
+    def test_cameras_are_grabbed_together_under_the_time_the_run_started(self):
+        src = self.images / "src.jpg"
+        jpeg(src)
+        together = threading.Barrier(2, timeout=2)
+
+        def slow_camera(url, quality, **pin):
+            together.wait()  # passes only while both cameras are being grabbed
+            threading.Event().wait(1.5)
+            return src.read_bytes()
+
+        old = t.grab_frame
+        self.addCleanup(lambda: setattr(t, "grab_frame", old))
+        t.grab_frame = slow_camera
+        before = datetime.now()
+        cameras = [{"name": name, "url": "rtsp://10.0.0.5:8554/live"} for name in ("cam1", "cam2")]
+        self.assertEqual(t.grab({**GOOD, "cameras": cameras}, self.images), [])
+        for name in ("cam1", "cam2"):
+            saved = next(self.images.glob(f"{name}/*/{name}_*.jpg"))
+            named = datetime.strptime(saved.stem[len(name) + 1:], "%Y-%m-%d_%H-%M-%S")
+            self.assertLess((named - before).total_seconds(), 0.5, saved.name)  # not the 1.5 seconds later it was saved
 
     def test_grab_error_never_leaks_the_camera_password(self):
         with self.assertRaises(GrabError) as caught:
