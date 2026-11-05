@@ -1,0 +1,16 @@
+{
+  "cameras": [
+    {
+      "name": "camera-1",
+      "url": "rtsp://ADDRESS:PORT/live"
+    }
+  ],
+  "times": [
+    "08:00",
+    "12:00",
+    "16:00"
+  ],
+  "stitch_time": "00:30",
+  "fps": 24,
+  "jpeg_quality": 95
+}

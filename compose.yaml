@@ -1,0 +1,47 @@
+name: wyze-timelapse
+
+x-app: &app
+  build: .
+  image: wyze-timelapse:local
+  environment:
+    TZ: ${TIMEZONE:?set TIMEZONE in .env}
+  cap_drop: [ALL]
+  security_opt: ["no-new-privileges:true"]
+
+# create_host_path: false makes a missing or unmounted storage folder an error instead of
+# letting Docker quietly create an empty one and fill the wrong disk.
+x-config: &config { type: bind, source: ./config, target: /config, read_only: true }
+x-images: &images
+  type: bind
+  source: ${IMAGES_PATH:?set IMAGES_PATH in .env}
+  target: /images
+  bind: { create_host_path: false }
+x-videos: &videos
+  type: bind
+  source: ${VIDEOS_PATH:?set VIDEOS_PATH in .env}
+  target: /videos
+  bind: { create_host_path: false }
+
+services:
+  # One snapshot per camera, then exit:  docker compose run --rm grab
+  grab:
+    <<: *app
+    profiles: [job]
+    command: [grab]
+    volumes: [*config, *images]
+
+  # Build any missing daily/weekly/monthly/yearly videos, then exit:  docker compose run --rm stitch
+  stitch:
+    <<: *app
+    profiles: [job]
+    command: [stitch]
+    network_mode: none
+    volumes: [*config, { <<: *images, read_only: true }, *videos]
+
+  # Settings page:  docker compose up -d   then open http://localhost:8080
+  web:
+    <<: *app
+    entrypoint: [python, -u, /app/web.py]
+    restart: unless-stopped
+    ports: ["127.0.0.1:${WEB_PORT:-8080}:8080"]
+    volumes: [{ <<: *config, read_only: false }]
