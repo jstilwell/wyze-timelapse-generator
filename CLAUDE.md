@@ -20,6 +20,9 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
   - check the model's API differences and adjust `app/view.py`: `NO_FALLBACK` lists models without a
     server-side refusal fallback, and the dialog's closing paragraph describes that difference;
   - keep a retired model's id working for configs that still name it, or have `with_defaults` move them on.
+
+  The Fable tier is left out on purpose: it costs 2.5 times what Opus does, which this yes-or-no check does
+  not need. Last checked against both pages on 2026-11-05.
 - Check settings-page changes in a real browser, not only with tests (see "Trying the page").
 
 ## Layout

@@ -47,7 +47,7 @@ RETAKES, RETAKE_WAIT = 3, 30  # a blocked view gets this many more pictures, thi
 # Claude models offered for the blocked-view check (the first is the default): name on the page, then dollars per
 # million tokens in and out, copied from https://platform.claude.com/docs/en/about-claude/pricing. CLAUDE.md says
 # when and how to bring this list up to date.
-PRICES_AS_OF = "October 2026"
+PRICES_AS_OF = "November 2026"
 VIEW_MODELS = {"claude-opus-5-5": ("Claude Opus 5.5", 4.00, 20.00),
                "claude-sonnet-5-5": ("Claude Sonnet 5.5", 2.00, 10.00),
                "claude-haiku-5-5": ("Claude Haiku 5.5", 0.10, 0.50)}
