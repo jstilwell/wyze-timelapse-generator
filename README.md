@@ -1,70 +1,80 @@
 # Wyze timelapse
 
-Takes a picture from each Wyze camera a few times a day and turns the pictures into timelapse videos:
-one per day, then per week, per month and per year. If anything goes wrong, the Mac shows a notification.
-
-## What you need
-
-- A Mac running macOS 12 or newer that is awake at the snapshot times
-- [Docker Desktop](https://www.docker.com/products/docker-desktop/), opened once so it finishes its own setup
-- A Wyze camera with RTSP turned on (Wyze app: camera Settings, Advanced Settings, RTSP)
+Takes a picture from each Wyze camera at set times of day and turns the pictures into timelapse videos:
+one per day, week, month and year. It runs by itself on a Mac and tells you when something goes wrong.
 
 ## Setup
 
-1. Put this folder somewhere it can stay. (If you move it later, run step 2 again.)
-2. In Terminal, from this folder, run:
+You need a Mac (macOS 12 or newer), [Docker Desktop](https://www.docker.com/products/docker-desktop/)
+opened once, and a Wyze camera with RTSP turned on (Wyze app: camera Settings, Advanced Settings, RTSP).
 
-   ```sh
-   ./launchd/install.sh
-   ```
+1. Put this folder somewhere it can stay. If you move it later, run step 2 again.
+2. In Terminal, from this folder, run `./launchd/install.sh`
+3. Open <http://localhost:8080>. Enter each camera's address, press **Test cameras** to see its picture,
+   then **Save settings**.
 
-   The first run creates a file named `.env`. Open it, set `IMAGES_PATH` and `VIDEOS_PATH` to two folders
-   that already exist (they can be the same folder), then run the command again.
-3. Open <http://localhost:8080>, enter the camera address and the times of day you want pictures, and save.
-4. Check that it works:
+From then on it runs by itself. The settings page shows each camera's latest picture, and changes made
+there apply within seconds.
 
-   ```sh
-   ./launchd/run.sh grab
-   ```
-
-   A picture should appear in your images folder within about ten seconds.
-
-From then on it runs by itself. Changing the times on the settings page updates the schedule automatically.
+**Keep the Mac awake.** In System Settings, under Energy (or Battery, Options), turn on "Prevent automatic
+sleeping when the display is off". A sleeping Mac takes one late picture when it wakes instead of the ones
+it missed.
 
 ## Where things end up
 
 ```
-IMAGES_PATH/front-yard/2026-11-05/front-yard_2026-11-05_08-00-03.jpg
-VIDEOS_PATH/front-yard/daily/front-yard_2026-11-05.mp4
-VIDEOS_PATH/front-yard/weekly/front-yard_2026-W45.mp4
-VIDEOS_PATH/front-yard/monthly/front-yard_2026-11.mp4
-VIDEOS_PATH/front-yard/yearly/front-yard_2026.mp4
+~/Pictures/wyze-timelapse/front-yard/2026-11-05/front-yard_2026-11-05_08-00-03.jpg
+~/Movies/wyze-timelapse/front-yard/daily/front-yard_2026-11-05.mp4
+~/Movies/wyze-timelapse/front-yard/weekly/front-yard_2026-W45.mp4
+~/Movies/wyze-timelapse/front-yard/monthly/front-yard_2026-11.mp4
+~/Movies/wyze-timelapse/front-yard/yearly/front-yard_2026.mp4
 ```
 
-Once a night, one job builds yesterday's video. When a week, month or year has just ended it also joins the
-shorter videos into the longer one, without re-compressing them. If the Mac was off for a few nights, the
-next run catches up on everything it missed.
+To use other folders, such as an external drive: run `open -e .env`, change `IMAGES_PATH` and
+`VIDEOS_PATH` to folders that exist, and run `./launchd/install.sh` again.
+
+Once a night, yesterday's video is built. When a week, month or year has just ended, the shorter videos
+are joined into the longer one without losing quality. After nights when the Mac was off, the next run
+catches up.
 
 Weeks run Monday to Sunday. A week that crosses a month end belongs to the month its Thursday is in, so a
-monthly video can start or end up to three days off the calendar month, and no day is ever left out or
-shown twice.
+monthly video can start or end up to three days off the calendar month. No day is left out or shown twice.
 
-## When something goes wrong
-
-Every run is checked: each picture and each video is fully decoded before it is kept, and each night the
-number of pictures taken the day before is compared with the number of times you set. A failure shows a
-macOS notification and is written to the `logs` folder here.
-
-To also get failures on a phone (yours or someone else's), put a web address in `NOTIFY_URL` in `.env`;
-an [ntfy.sh](https://ntfy.sh) topic address works as it is.
-
-## Other commands
+## Alerts
 
 | | |
 | --- | --- |
+| On the Mac | Any failure shows a notification. Details are in the `logs` folder. |
+| On a phone | Put an [ntfy.sh](https://ntfy.sh) topic address in `NOTIFY_URL` in `.env`. |
+| When it stops running | Put a [healthchecks.io](https://healthchecks.io) check address (period: 1 day) in `HEARTBEAT_URL` in `.env`. It alerts you when the Mac is off, logged out or otherwise silent. |
+
+Edit `.env` with `open -e .env`. No need to run anything afterwards.
+
+## When something goes wrong
+
+| Message | What to do |
+| --- | --- |
+| `no usable frame after 3 attempts` | The camera is off, has a new address, or its password changed. Check it with **Test cameras**. |
+| `only 1 of 3 snapshots were taken` | The Mac was asleep or off, or the camera was unreachable. Nothing to repair. |
+| `… is corrupt` | Delete the file it names from the pictures or videos folder, then run `./launchd/run.sh stitch`. |
+| `Cannot connect to the Docker daemon` | Open Docker Desktop. In its settings, turn on starting when you sign in. |
+| `bind source path does not exist` | The pictures or videos folder is missing. Reconnect the drive, then run `./launchd/install.sh`. |
+| The settings page does not open | Run `./launchd/install.sh`. |
+
+## Commands
+
+| | |
+| --- | --- |
+| `./launchd/run.sh grab` | Take a picture from every camera now |
 | `./launchd/run.sh stitch` | Build any missing videos now |
+| `./launchd/install.sh` | Install, or apply an update or a changed `.env` |
 | `./launchd/install.sh uninstall` | Stop everything. Pictures and videos are kept. |
-| `docker compose run --rm --entrypoint python stitch -m unittest discover -s /app` | Run the self-tests |
-| `docker compose run --rm --entrypoint python grab rtsp_grabber.py rtsp://ADDRESS:PORT/live /images/test.jpg` | Grab a single picture by hand |
+| `./test.sh` | Run the self-tests (needs only Docker) |
+
+## Updates
+
+Everything the tool is built from is pinned to an exact version. On GitHub, Dependabot proposes newer
+versions once a month and the self-tests run on each proposal. After pulling an update, run
+`./launchd/install.sh`.
 
 `app/rtsp_grabber.py` is a rewrite of [jcriger/rtsp-grabber](https://github.com/jcriger/rtsp-grabber) (MIT).
