@@ -135,6 +135,15 @@ class Config(unittest.TestCase):
                     changed({"brightness": 1.5})):
             self.assertEqual(len(t.validate(cfg)), 1, cfg)
 
+    def test_a_password_the_page_could_not_hide_is_refused(self):
+        def problems(url):
+            return t.validate({**GOOD, "cameras": [{"name": "cam1", "url": url}]})
+
+        self.assertEqual(problems("rtsp://admin:pa/ss@10.0.0.5/live"), ["camera 'cam1': write a / in the password as %2F"])
+        self.assertEqual(web.mask("rtsp://admin:pa%2Fss@10.0.0.5/live"), "rtsp://admin:••••@10.0.0.5/live")
+        for fine in ("rtsp://admin:pa%2Fss@10.0.0.5/live", "rtsp://admin:p@ss@10.0.0.5/live", "rtsp://10.0.0.5/live"):
+            self.assertEqual(problems(fine), [], fine)
+
     def test_older_config_files_keep_working(self):
         old = {"cameras": GOOD["cameras"], "times": ["08:00"], "stitch_time": "00:30", "fps": 12, "jpeg_quality": 90}
         cfg = t.with_defaults(dict(old))
@@ -542,7 +551,7 @@ class Server(unittest.TestCase):
         self.assertEqual(self.ask("POST", "/", FORM, **{"Content-Length": "x"})[0], 400)
 
     def test_unreadable_config_still_gives_a_usable_page(self):
-        for junk in ("{not json", "[1, 2]", json.dumps({**GOOD, "cameras": [7]})):
+        for junk in ("{not json", "[1, 2]", json.dumps({**GOOD, "cameras": [7]}), json.dumps({**GOOD, "view_model": []})):
             self.config.write_text(junk)
             status, body, _ = self.ask("GET", "/")
             self.assertEqual(status, 200, junk)

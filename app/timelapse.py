@@ -81,7 +81,7 @@ def read_config():
 def well_formed(cfg):
     """True when every setting is the right kind of value, so validate() and the settings page can read it."""
     return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str) and isinstance(cfg.get("video"), dict)
-            and isinstance(cfg.get("view_notes"), str)
+            and isinstance(cfg.get("view_notes"), str) and isinstance(cfg.get("view_model"), str)
             and isinstance(cfg.get("levels"), dict)
             and all(isinstance(cfg["levels"].get(level), dict) and isinstance(cfg["levels"][level].get("from"), str)
                     and isinstance(cfg["levels"][level].get("to"), str) for level in LEVELS)
@@ -108,6 +108,8 @@ def validate(cfg):
             errs.append(f"camera name {c['name']!r}: use a-z, 0-9, - and _ (max 32 characters)")
         if not URL.fullmatch(c["url"]):
             errs.append(f"camera {c['name']!r}: address must look like rtsp://address:port/path")
+        elif "@" in c["url"] and "@" not in c["url"].split("/")[2]:  # the page could not hide that password
+            errs.append(f"camera {c['name']!r}: write a / in the password as %2F")
     if not times or len(set(times)) != len(times) or not all(HHMM.fullmatch(t) for t in times):
         errs.append("snapshot times: one or more different 24-hour HH:MM values")
     if not HHMM.fullmatch(cfg["stitch_time"]):
@@ -119,7 +121,7 @@ def validate(cfg):
         errs.append("picture quality: a whole number from 1 to 100")
     if type(cfg.get("check_view")) is not bool or type(cfg.get("view_compare")) is not bool:
         errs.append("check each picture, and its comparison picture: on or off")
-    if not isinstance(cfg.get("view_model"), str) or cfg["view_model"] not in VIEW_MODELS:
+    if cfg["view_model"] not in VIEW_MODELS:
         errs.append(f"model for the check: one of {', '.join(VIEW_MODELS)}")
     if len(cfg["view_notes"]) > 2000:
         errs.append("notes for Claude: 2,000 characters at most")
