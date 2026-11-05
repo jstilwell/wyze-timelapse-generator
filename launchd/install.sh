@@ -55,11 +55,15 @@ mkdir -p $agents $root/logs
 
 if [[ $1 != schedules ]]; then  # first-time checks, then build the image and start the settings page
   command -v docker >/dev/null || { print -u2 "Docker Desktop is needed first: https://www.docker.com/products/docker-desktop/"; exit 1 }
-  if [[ ! -f $root/.env ]]; then
-    sed "s|^TIMEZONE=.*|TIMEZONE=${$(readlink /etc/localtime)#*zoneinfo/}|" $root/.env.example > $root/.env
-    print "Created $root/.env\nOpen it, set IMAGES_PATH and VIDEOS_PATH to folders that exist, then run this again."
-    exit 1
+  if [[ ! -f $root/.env ]]; then  # first run: this Mac's time zone and two folders in the home folder
+    sed -e "s|^TIMEZONE=.*|TIMEZONE=${$(readlink /etc/localtime)#*zoneinfo/}|" \
+        -e "s|^IMAGES_PATH=.*|IMAGES_PATH=$HOME/Pictures/wyze-timelapse|" \
+        -e "s|^VIDEOS_PATH=.*|VIDEOS_PATH=$HOME/Movies/wyze-timelapse|" $root/.env.example > $root/.env
+    mkdir -p ~/Pictures/wyze-timelapse ~/Movies/wyze-timelapse
+    print "Pictures go to ~/Pictures/wyze-timelapse and videos to ~/Movies/wyze-timelapse."
+    print "To use other folders, run:  open -e $root/.env   and then this script again."
   fi
+  chmod 600 $cfg $root/.env  # camera passwords and notification addresses: this user only
   for key in IMAGES_PATH VIDEOS_PATH; do
     dir=$(sed -n "s/^$key=//p" $root/.env)
     [[ -d $dir ]] || { print -u2 "$key in $root/.env is '$dir', which is not an existing folder. Fix it and run this again."; exit 1 }
