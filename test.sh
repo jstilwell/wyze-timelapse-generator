@@ -8,4 +8,5 @@ docker run --rm --read-only --tmpfs /tmp --network none --cap-drop ALL --securit
   --entrypoint python wyze-timelapse:test -m unittest discover -s /app -b "$@"
 TIMEZONE=UTC IMAGES_PATH=/tmp VIDEOS_PATH=/tmp docker compose config -q
 if command -v zsh >/dev/null; then zsh -n launchd/install.sh && zsh -n launchd/run.sh; fi
+if command -v osascript >/dev/null; then launchd/test-alerts.sh; fi
 echo "all checks passed"

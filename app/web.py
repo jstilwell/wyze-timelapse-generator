@@ -13,10 +13,12 @@ from pathlib import Path
 from urllib.parse import parse_qs, urlsplit
 
 from rtsp_grabber import GrabError, grab_frame
-from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, PRICES_AS_OF, RANGES, SWITCHES, URL, VIEW_MODELS,
-                       latest, read_config, still, validate, well_formed, with_defaults)
+from timelapse import (ALERT_FIELDS, ALERTS, CHOICES, CONFIG, HHMM, IMAGES, LEVELS, PRICES_AS_OF, RANGES, SWITCHES,
+                       URL, VIEW_MODELS, alert_problems, latest, read_config, still, validate, well_formed,
+                       with_defaults)
 
-MASK = "••••"  # shown in place of a saved camera password
+MASK = "••••"  # shown in place of a saved camera password or alert key
+ALERT_SECRETS = ("ntfy_url", "telegram_token", "pushover_token", "pushover_user", "email_key")
 LOGS = Path("/logs")  # what launchd/run.sh wrote about every run; mounted read-only
 RUN = re.compile(r"^=== (\d{4}-\d\d-\d\d) (\d\d:\d\d):\d\d \w+ exit=(\d+)\n", re.M)  # run.sh's line above each run
 
@@ -190,6 +192,13 @@ and yearly videos.</p>
     <p class="hint">Applies to videos built from now on. To remake an older video, delete its file and it is
     built again the next night. Preview look shows the result on each camera's latest picture.</p>
     {look}
+  </section>
+
+  <section>
+    <h2>Alerts</h2>
+    <p class="hint">A failure always shows on this Mac. Fill in any of these to hear about it elsewhere too; each one
+    is used once it is filled in. To try them, run <code>./launchd/run.sh test</code> in Terminal.</p>
+    {alerts}
   </section>
 
   <section class="actions">
@@ -442,6 +451,33 @@ def look_controls(video):
             'nothing.</p>')
 
 
+ALERT_BOXES = {
+    "ntfy": {"ntfy_url": ("Topic address", "https://ntfy.sh/a-long-private-name")},
+    "Telegram": {"telegram_token": ("Bot token", "123456:ABC-def"), "telegram_chat": ("Chat id", "123456789")},
+    "Pushover": {"pushover_token": ("App token", ""), "pushover_user": ("User key", "")},
+    "Email": {"email_key": ("API key", ""), "email_account": ("Cloudflare account id", "Cloudflare only"),
+              "email_from": ("From", "alerts@example.com"), "email_to": ("To", "you@example.com")},
+}
+
+
+def alert_controls(alerts, saved):
+    """The alert boxes. A saved key shows as the mask; one typed in this request is shown back as typed."""
+    def box(key, label, example):
+        value = MASK if key in ALERT_SECRETS and alerts[key] and alerts[key] == saved[key] else alerts[key]
+        return (f'<div><label for="{key}">{label}</label><input id="{key}" name="{key}" value="{html.escape(value)}" '
+                f'placeholder="{example}" autocomplete="off" autocapitalize="none" spellcheck="false"></div>')
+
+    provider = ('<div><label for="email_provider">Send through</label><select id="email_provider" '
+                'name="email_provider">' + "".join(
+                    f'<option value="{value}"{" selected" * (alerts["email_provider"] == value)}>{text}</option>'
+                    for value, text in (("", "Off"), ("resend", "Resend"), ("cloudflare", "Cloudflare"))) +
+                "</select></div>")
+    return "\n    ".join(
+        f'<fieldset class="level"><legend>{name}</legend><div class="fields wide">'
+        f'{provider * (name == "Email")}{"".join(box(key, *text) for key, text in boxes.items())}</div></fieldset>'
+        for name, boxes in ALERT_BOXES.items())
+
+
 EXPECT = {"claude-opus-5-5": "The most careful judge, and Anthropic's recommended default. Best when the view is "
                              "cluttered or your notes describe fine distinctions.",
           "claude-sonnet-5-5": "A middle choice: quicker, and half the price of Opus.",
@@ -470,9 +506,9 @@ def money(dollars):
     return f"{dollars * 100:.0f}¢" if dollars < 0.995 else f"${dollars:.2f}" if dollars < 20 else f"${dollars:.0f}"
 
 
-def render(cfg, message="", saved=None, tests=None):
-    """The page for a well-formed config. `saved` is the stored camera list when `cfg` is not it (a rejected or
-    test submission); `tests` holds one picture slot per camera after Test cameras."""
+def render(cfg, message="", saved=None, tests=None, alerts=None):
+    """The page for a well-formed config. `saved` and `alerts` are the stored camera list and alert settings when
+    `cfg` is not them (a rejected or test submission); `tests` holds one picture slot per camera after Test cameras."""
     secret = {c["url"] for c in (cfg["cameras"] if saved is None else saved)}
     chosen = cfg.get("view_model") if cfg.get("view_model") in VIEW_MODELS else next(iter(VIEW_MODELS))
     return PAGE.format(
@@ -503,13 +539,15 @@ def render(cfg, message="", saved=None, tests=None):
         view_notes=html.escape(cfg["view_notes"]),
         levels=level_rows(cfg),
         look=look_controls(cfg["video"]),
+        alerts=alert_controls(cfg["alerts"], cfg["alerts"] if alerts is None else alerts),
     )
 
 
-def from_form(form, saved=()):
+def from_form(form, saved=(), alerts=ALERTS):
     """(config, problems) from a posted form. `saved` is the stored camera list: an address that comes back
     still masked gets its stored password, and only for that exact address. An rtsps camera keeps its stored
-    certificate while its host and port stay the same and its "store the new one" box is not ticked."""
+    certificate while its host and port stay the same and its "store the new one" box is not ticked. `alerts` is
+    the stored alert settings: a key that comes back masked keeps its stored value, and an emptied one is removed."""
     def field(key):
         return form.get(key, [""])[0].strip()
 
@@ -543,10 +581,14 @@ def from_form(form, saved=()):
                       "from": field(f"{level}_from"), "to": field(f"{level}_to")} for level in LEVELS}
     video = ({key: field(key) for key in CHOICES} | {key: key in form for key in SWITCHES}
              | {key: number(key) for key in RANGES})
+    wanted = {key: alerts[key] if key in ALERT_SECRETS and field(key) == MASK else field(key) for key in ALERT_FIELDS}
+    # A key belongs to one provider. Kept for another, every alert by email would quietly fail.
+    if field("email_key") == MASK and wanted["email_provider"] not in ("", alerts["email_provider"]):
+        errors.append("Email: type the API key of the new provider")
     return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"),
             "jpeg_quality": number("jpeg_quality"), "levels": levels, "video": video,
             "check_view": "check_view" in form, "view_notes": field("view_notes"),
-            "view_model": field("view_model"), "view_compare": "view_compare" in form}, errors
+            "view_model": field("view_model"), "view_compare": "view_compare" in form, "alerts": wanted}, errors
 
 
 def load():
@@ -635,8 +677,9 @@ class Handler(BaseHTTPRequestHandler):
         if int(length) > 65536:
             return self.send_error(413)
         form = parse_qs(self.rfile.read(int(length)).decode("utf-8", "replace"), keep_blank_values=True)
-        stored = load()[0]["cameras"]
-        cfg, errors = from_form(form, stored)
+        current = load()[0]
+        stored, alerts = current["cameras"], current["alerts"]
+        cfg, errors = from_form(form, stored, alerts)
         for cam in cfg["cameras"]:
             if cam["url"].startswith("rtsps:") and "cert" not in cam:
                 try:
@@ -648,13 +691,13 @@ class Handler(BaseHTTPRequestHandler):
             with ThreadPoolExecutor() as pool:
                 tests = list(pool.map(try_camera, cfg["cameras"]))
             return self.reply(200, render(cfg, '<div role="status">Test finished. Nothing was saved.</div>',
-                                          stored, tests))
-        errors += validate(cfg)
+                                          stored, tests, alerts))
+        errors += validate(cfg) + alert_problems(cfg["alerts"])
         if form.get("action") == ["preview"] and not errors:
             with ThreadPoolExecutor() as pool:
                 tests = list(pool.map(lambda cam: preview(cam, cfg["video"]), cfg["cameras"]))
             return self.reply(200, render(cfg, '<div role="status">Preview made. Nothing was saved.</div>',
-                                          stored, tests))
+                                          stored, tests, alerts))
         if not errors:
             try:
                 tmp = CONFIG.with_suffix(".tmp")
@@ -664,10 +707,11 @@ class Handler(BaseHTTPRequestHandler):
                 errors = [f"the settings file could not be written ({e.strerror})"]
         if errors:
             items = "".join(f"<li>{html.escape(e)}</li>" for e in errors)
-            return self.reply(400, render(cfg, f'<div role="alert">Not saved:<ul>{items}</ul></div>', stored))
+            return self.reply(400, render(cfg, f'<div role="alert">Not saved:<ul>{items}</ul></div>', stored,
+                                          alerts=alerts))
         self.reply(303, location="/?saved")  # redirect, so a refresh does not post the form again
 
 
 if __name__ == "__main__":
-    os.umask(0o077)  # config.json holds camera passwords: readable by its owner only
+    os.umask(0o077)  # config.json holds camera passwords and alert keys: readable by its owner only
     ThreadingHTTPServer(("0.0.0.0", 8080), Handler).serve_forever()

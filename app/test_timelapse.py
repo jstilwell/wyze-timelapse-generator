@@ -171,6 +171,55 @@ FORM = {"name": ["cam1", ""], "url": ["rtsp://10.0.0.5:8554/live", ""], "times":
         "view_model": ["claude-opus-5-5"], "view_compare": ["on"]}
 
 
+class Alerts(unittest.TestCase):
+    FILLED = {"ntfy_url": "https://ntfy.sh/secret-topic", "telegram_token": "123456:ABC-def_1",
+              "telegram_chat": "-100123", "pushover_token": "a" * 30, "pushover_user": "b" * 30,
+              "email_provider": "cloudflare", "email_key": "cf-key_1", "email_account": "0" * 32,
+              "email_from": "alerts@example.com", "email_to": "me@example.com"}
+
+    def test_an_older_config_has_every_channel_off(self):
+        self.assertEqual(GOOD["alerts"], dict.fromkeys(t.ALERT_FIELDS, ""))
+        self.assertEqual(t.alert_problems(GOOD["alerts"]), [])
+        self.assertFalse(t.well_formed({**GOOD, "alerts": {**GOOD["alerts"], "email_to": 5}}))
+
+    def test_a_filled_in_form_is_accepted(self):
+        cfg, errors = web.from_form({**FORM, **{key: [value] for key, value in self.FILLED.items()}})
+        self.assertEqual((cfg["alerts"], errors), (self.FILLED, []))
+        self.assertEqual(t.alert_problems(cfg["alerts"]), [])
+
+    def test_a_half_filled_channel_is_refused(self):
+        for given, word in (({"telegram_token": "1:a"}, "Telegram"), ({"telegram_chat": "1"}, "Telegram"),
+                            ({"pushover_user": "b"}, "Pushover"), ({"email_provider": "resend"}, "Email"),
+                            ({**self.FILLED, "email_account": ""}, "Cloudflare")):
+            problems = t.alert_problems({**t.ALERTS, **given})
+            self.assertEqual(len(problems), 1, given)
+            self.assertIn(word, problems[0])
+
+    def test_email_is_off_with_no_provider_even_with_its_boxes_filled(self):
+        self.assertEqual(t.alert_problems({**t.ALERTS, "email_key": "k", "email_to": "me@example.com"}), [])
+
+    def test_a_value_that_would_break_out_of_the_curl_config_is_refused(self):
+        for key, value in (("ntfy_url", 'https://a"\nurl = "file:///etc/passwd'), ("ntfy_url", "file:///etc/passwd"),
+                           ("ntfy_url", "https://a\\b"), ("telegram_token", '1:a"b'), ("pushover_token", 'a"'),
+                           ("pushover_user", "a\nb"), ("email_key", 'k"'), ("email_account", "zz"),
+                           ("email_to", "no-at-sign"), ("email_provider", "smtp")):
+            problems = t.alert_problems({**self.FILLED, key: value})
+            self.assertTrue(problems, (key, value))
+            self.assertNotIn(value, " ".join(problems))  # a mistyped key is not repeated back
+
+    def test_a_masked_key_stays_and_an_emptied_one_goes(self):
+        form = {**FORM, **{key: [web.MASK if key in web.ALERT_SECRETS else value]
+                           for key, value in self.FILLED.items()}}
+        self.assertEqual(web.from_form(form, alerts=self.FILLED), ({**GOOD, "alerts": self.FILLED}, []))
+        self.assertEqual(web.from_form({**form, "telegram_token": [""]}, alerts=self.FILLED)[0]["alerts"]
+                         ["telegram_token"], "")
+
+    def test_a_saved_key_is_not_sent_to_a_different_provider(self):
+        form = {**FORM, "email_provider": ["resend"], "email_key": [web.MASK]}
+        self.assertEqual(len(web.from_form(form, alerts=self.FILLED)[1]), 1)
+        self.assertEqual(web.from_form({**form, "email_key": ["new"]}, alerts=self.FILLED)[1], [])
+
+
 class Form(unittest.TestCase):
     def test_round_trip_and_escaping(self):
         self.assertEqual(web.from_form(FORM), (GOOD, []))
@@ -510,6 +559,26 @@ class Server(unittest.TestCase):
         conn.request(method, path, urlencode(form, doseq=True) if form else None, headers)
         r = conn.getresponse()
         return r.status, r.read(), r
+
+    def test_alert_keys_never_reach_the_page(self):
+        keys = {"telegram_token": "123456:hunter3", "telegram_chat": "42", "ntfy_url": "https://ntfy.sh/hunter4"}
+        self.config.write_text(json.dumps({**GOOD, "alerts": {**GOOD["alerts"], **keys}}))
+        body = self.ask("GET", "/")[1].decode()
+        self.assertNotIn("hunter", body)
+        self.assertIn('value="42"', body)
+        self.assertIn(f'name="telegram_token" value="{web.MASK}"', body)
+        form = {**FORM, "telegram_token": [web.MASK], "telegram_chat": ["42"], "ntfy_url": [web.MASK]}
+        self.assertEqual(self.ask("POST", "/", form)[0], 303)
+        self.assertEqual({k: json.loads(self.config.read_text())["alerts"][k] for k in keys}, keys)
+        # A refused save shows what was typed, so that nothing typed is lost, and still hides what is stored.
+        status, body, _ = self.ask("POST", "/", {**form, "pushover_user": ["typed1"], "times": ["nonsense"]})
+        self.assertEqual(status, 400)
+        self.assertNotIn(b"hunter", body)
+        self.assertIn(b'value="typed1"', body)
+        status, body, _ = self.ask("POST", "/", {**form, "telegram_chat": [""]})
+        self.assertEqual(status, 400)
+        self.assertIn(b"Telegram needs both", body)
+        self.assertNotIn(b"hunter", body)
 
     def test_page_shows_the_latest_picture_and_no_password(self):
         status, body, r = self.ask("GET", "/")

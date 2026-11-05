@@ -1,6 +1,7 @@
 #!/bin/zsh
-# usage: run.sh grab|stitch|reload
-# Runs one compose job, or for "reload" re-applies the schedule after a config change. Whatever goes wrong
+# usage: run.sh grab|stitch|reload|test
+# Runs one compose job, for "reload" re-applies the schedule after a config change, or for "test" sends a test
+# message everywhere alerts are set up. Whatever goes wrong
 # (Docker down, storage missing, camera offline, corrupt file, missed snapshots, bad config) ends up in
 # logs/<job>.log and in a notification. A run that works pings HEARTBEAT_URL, so that silence (Mac off, logged
 # out, agents unloaded) is noticed by whoever is watching that address.
@@ -10,16 +11,61 @@ job=$1
 mkdir -p logs
 
 setting() { sed -n "s/^$1=//p" .env 2>/dev/null }
+# shortcut: a config.json that is not valid JSON reads as empty, so only the Mac and .env's NOTIFY_URL still alert
+alert() { plutil -extract alerts.$1 raw -o - config/config.json 2>/dev/null }
+
+unsent=0
+send() {  # service, curl config, then more curl options. Keys go in the config, on stdin, to stay out of `ps`.
+  local service=$1 conf=$2
+  shift 2
+  # Sent in a job's failure path, so a service that fails is logged and the next one is still tried.
+  if curl -fsg -m 20 -o /dev/null -K - "$@" <<<"$conf"; then
+    print -r -- "$service alert sent"
+  else
+    print -r -- "could not send the $service alert (curl error $?)" | tee -a "logs/$job.log"
+    unsent=1
+  fi
+}
 
 notify() {
+  local title="Wyze timelapse: $job failed"
+  [[ $job == test ]] && title="Wyze timelapse: test"
   # the message is passed as an argument, never spliced into the script text
   osascript -e 'on run a' \
     -e 'display notification (item 1 of a) with title (item 2 of a) sound name "Basso"' \
-    -e 'end run' -- "$1" "Wyze timelapse: $job failed"
-  local url=$(setting NOTIFY_URL)
+    -e 'end run' -- "$1" "$title"
+
+  local url=$(alert ntfy_url)
+  url=${url:-$(setting NOTIFY_URL)}
   # --data-raw: plain -d would read a file if the message happened to start with @
-  [[ -z $url ]] || curl -fsS -m 20 -H "Title: Wyze timelapse: $job failed" --data-raw "$1" "$url" >/dev/null
+  [[ -z $url ]] || send ntfy "url = \"$url\"" -H "Title: $title" --data-raw "$1"
+
+  local token=$(alert telegram_token) chat=$(alert telegram_chat)
+  [[ -z $token || -z $chat ]] || send Telegram "url = \"https://api.telegram.org/bot$token/sendMessage\"" \
+    --data-urlencode "chat_id=$chat" --data-urlencode "text=$title"$'\n'"$1"
+
+  local app=$(alert pushover_token) user=$(alert pushover_user)
+  [[ -z $app || -z $user ]] || send Pushover "url = \"https://api.pushover.net/1/messages.json\"
+data-urlencode = \"token=$app\"
+data-urlencode = \"user=$user\"" --data-urlencode "title=$title" --data-urlencode "message=$1"
+
+  local provider=$(alert email_provider)
+  [[ -n $provider ]] || return 0
+  url=https://api.resend.com/emails
+  [[ $provider == cloudflare ]] &&
+    url=https://api.cloudflare.com/client/v4/accounts/$(alert email_account)/email/sending/send
+  # osascript writes the JSON because every Mac has it, and neither jq nor python is certain to be there.
+  # shortcut: Cloudflare can answer 200 and still list the address as bounced, which counts as sent here.
+  send "$provider email" "url = \"$url\"
+header = \"Authorization: Bearer $(alert email_key)\"" -H 'Content-Type: application/json' --data-raw "$(
+    osascript -l JavaScript -e 'function run(a) { return JSON.stringify({from: a[0], to: a[1], subject: a[2], text: a[3]}) }' \
+      -- "$(alert email_from)" "$(alert email_to)" "$title" "$1")"
 }
+
+if [[ $job == test ]]; then
+  notify "This is a test. If you can read this, alerts reach you here."
+  exit $unsent
+fi
 
 if [[ $job == reload ]]; then
   out=$(launchd/install.sh schedules 2>&1)

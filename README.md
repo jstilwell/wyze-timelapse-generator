@@ -81,10 +81,24 @@ as the usual view. Leave those files where they are.
 | | |
 | --- | --- |
 | On the Mac | Any failure shows a notification, and the settings page lists the last run's problems. Details are in the `logs` folder. |
-| On a phone | Put an [ntfy.sh](https://ntfy.sh) topic address in `NOTIFY_URL` in `.env`. |
+| Anywhere else | Fill in any of the services below under **Alerts** on the settings page. Every one you fill in gets every failure. |
 | When it stops running | Put a [healthchecks.io](https://healthchecks.io) check address (period: 1 day) in `HEARTBEAT_URL` in `.env`. It alerts you when the Mac is off, logged out or otherwise silent. |
 
 Edit `.env` with `open -e .env`. No need to run anything afterwards.
+
+| Service | What to fill in |
+| --- | --- |
+| [ntfy](https://ntfy.sh) | A topic address. Anyone who knows it can read your alerts, so make the name long. An address already in `NOTIFY_URL` in `.env` keeps working. |
+| Telegram | Make a bot with [@BotFather](https://t.me/BotFather) and copy its token. Send your bot a message, then open `https://api.telegram.org/bot<token>/getUpdates` and copy the `chat` `id`. |
+| [Pushover](https://pushover.net) | Your user key, and the token of an application you create there. |
+| Email through [Resend](https://resend.com) | An API key, a from address on a domain you verified there, and a to address. |
+| Email through [Cloudflare](https://developers.cloudflare.com/email-service/) | An API token that may send email, your account id, a from address on a domain set up for Email Sending, and a to address. |
+
+Saved keys show as `••••`. Leave that as it is to keep a key, or empty the box to remove it. If you change the email
+provider, type the new provider's key.
+
+To try them all, run `./launchd/run.sh test` in Terminal. It says which ones worked. If an alert could not be sent
+when something failed, the job's file in the `logs` folder says so.
 
 ## When something goes wrong
 
