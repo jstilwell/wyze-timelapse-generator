@@ -70,6 +70,9 @@ Each check sends the new picture, shrunk, to Anthropic. Sending the camera's pre
 Claude the usual view; it can be switched off to save money, and the page shows the cost both ways. The key
 stays in `.env` and is never shown on the settings page.
 
+A picture kept with its view still blocked gets an empty `.blocked` file beside it, so that it is never used
+as the usual view. Leave those files where they are.
+
 ## Alerts
 
 | | |

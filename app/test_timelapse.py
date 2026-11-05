@@ -407,6 +407,12 @@ class ViewCheck(unittest.TestCase):
         self.assertEqual(kept, 0)
         self.assertIn("blocked (a bird) and the retake failed", note)
 
+    def test_a_picture_kept_with_its_view_blocked_is_not_the_usual_view_next_time(self):
+        self.snap(["a tarp"] * 4)
+        self.snap([""])
+        self.assertEqual(self.compared, [("cam1", self.shot)])
+        self.assertNotEqual(t.latest("cam1", self.images), self.shot)  # the settings page still shows the newest
+
     def test_grab_job_checks_only_when_switched_on_and_reports_a_view_that_stays_blocked(self):
         old = t.grab_frame
         self.addCleanup(lambda: setattr(t, "grab_frame", old))

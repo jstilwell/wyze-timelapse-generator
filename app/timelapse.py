@@ -158,12 +158,13 @@ def probe(src):
 
 # ---- grab ----------------------------------------------------------------------------------------------------------
 
-def latest(cam, images):
-    """Newest saved picture of a camera, or None. `cam` may come from a web request, so it is checked before
-    it becomes a path."""
+def latest(cam, images, clear=False):
+    """Newest saved picture of a camera, or None; with `clear`, the newest that was not kept with its view
+    blocked. `cam` may come from a web request, so it is checked before it becomes a path."""
     if NAME.fullmatch(cam):
         for day in sorted((images / cam).glob("????-??-??"), reverse=True):
-            shots = sorted(p for p in day.glob(f"{cam}_*.jpg") if SHOT.fullmatch(p.name))
+            shots = sorted(p for p in day.glob(f"{cam}_*.jpg") if SHOT.fullmatch(p.name)
+                           and not (clear and p.with_suffix(".blocked").exists()))
             if shots:
                 return shots[-1]
 
@@ -187,12 +188,12 @@ def snapshot(grab, cam, quality, images, check=None):
     is taken again; whatever happens after the first good frame, a picture is saved, and the note says so when
     the check failed or the view never cleared."""
     jpeg, size = frame(grab, cam, quality)
-    note = None
+    note, reason = None, ""  # `reason` ends up as what blocks the view in the picture that is saved
     for retake in range(RETAKES + 1) if check else ():
         try:
-            reason = check(jpeg, cam["name"], latest(cam["name"], images))
+            reason = check(jpeg, cam["name"], latest(cam["name"], images, clear=True))
         except Exception as e:  # no key, no network, an API fault: the picture matters more than the check
-            note = f"the view could not be checked ({e}); the picture was kept"
+            note, reason = f"the view could not be checked ({e}); the picture was kept", ""
             break
         if not reason:
             break
@@ -243,6 +244,8 @@ def snapshot(grab, cam, quality, images, check=None):
         if piexif.load(str(part))["Exif"].get(piexif.ExifIFD.DateTimeOriginal) != stamp.encode():
             raise RuntimeError("snapshot metadata did not survive the write")
         os.replace(part, final)
+        if reason:  # marked, so that the next check is not shown a blocked view as the usual one
+            final.with_suffix(".blocked").touch()
     finally:
         part.unlink(missing_ok=True)
     return final, note
