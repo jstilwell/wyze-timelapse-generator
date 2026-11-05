@@ -10,10 +10,11 @@ import subprocess
 
 import anthropic
 
-# Anthropic's guidance is to default to the current Opus. Each check sends two shrunken pictures, roughly 2,000
-# tokens. To trade accuracy for cost, name claude-sonnet-5-5 or claude-haiku-5-5 here; for Haiku also delete the
-# betas= and fallbacks= lines below, which it does not support.
-MODEL = "claude-opus-5-5"
+from timelapse import VIEW_MODELS
+
+# If a safety classifier declines a request, Anthropic can re-run it on a fallback model it picks. Haiku has no
+# such fallback and must not be sent the parameter.
+NO_FALLBACK = {"claude-haiku-5-5"}
 
 SYSTEM = """You check pictures from a fixed outdoor camera that takes a few pictures a day for a long-running \
 timelapse. Every picture should show the camera's usual scene, so one where something is in the way gets taken again \
@@ -49,11 +50,12 @@ def picture(src):
                                         "data": base64.standard_b64encode(r.stdout).decode()}}
 
 
-def blocked(frame, camera, usual=None, notes=""):
+def blocked(frame, camera, usual=None, notes="", model=next(iter(VIEW_MODELS))):
     """What is blocking the view in `frame` (JPEG bytes), in a few words, or "" when nothing is.
 
-    `usual` is an earlier picture from the same camera for comparison, `notes` the owner's free text from the
-    settings page. Raises CheckError when no answer could be had; the caller keeps the picture in that case.
+    `usual` is an earlier picture from the same camera for comparison, `notes` the owner's free text and `model`
+    their choice from the settings page. Raises CheckError when no answer could be had; the caller keeps the
+    picture in that case.
     """
     if not os.environ.get("ANTHROPIC_API_KEY"):
         raise CheckError("ANTHROPIC_API_KEY is not set in .env")
@@ -66,16 +68,15 @@ def blocked(frame, camera, usual=None, notes=""):
         content.append({"type": "text", "text": f"The owner's notes on what is normal for their cameras. This camera "
                                                 f"is named {camera}.\n<notes>\n{notes.strip()}\n</notes>"})
     content.append({"type": "text", "text": "Is the view blocked in the new picture?"})
+    fallback = {} if model in NO_FALLBACK else {"betas": ["server-side-fallback-2026-07-01"], "fallbacks": "default"}
     try:
         response = anthropic.Anthropic(timeout=60.0).beta.messages.create(
-            model=MODEL,
+            model=model,
             max_tokens=2000,  # the answer is one line; the rest is room for the model's thinking
             system=SYSTEM,
             messages=[{"role": "user", "content": content}],
             output_config={"effort": "low", "format": {"type": "json_schema", "schema": VERDICT}},
-            # if a safety classifier declines the request, Anthropic re-runs it on its recommended fallback model
-            betas=["server-side-fallback-2026-07-01"],
-            fallbacks="default",
+            **fallback,
         )
     except anthropic.AuthenticationError:
         raise CheckError("Anthropic did not accept ANTHROPIC_API_KEY") from None

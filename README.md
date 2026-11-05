@@ -60,11 +60,15 @@ scene is left alone. A picture is always kept, even when the check fails.
 
 1. Get an API key at <https://platform.claude.com>.
 2. Run `open -e .env` and put the key after `ANTHROPIC_API_KEY=`.
-3. On the settings page, tick **Check each picture with Claude**. In the box below it, describe anything
-   Claude should know, such as "the white post on the left is always there".
+3. On the settings page, tick **Check each picture with Claude** and pick a model. Each one is listed with
+   its estimated monthly cost for your cameras and picture times; **Compare the models** explains the
+   differences.
+4. In the box below, describe anything Claude should know, such as "the white post on the left is always
+   there".
 
-Each check sends the new picture and the camera's previous one, shrunk, to Anthropic, and costs about a
-cent or two. The key stays in `.env` and is never shown on the settings page.
+Each check sends the new picture, shrunk, to Anthropic. Sending the camera's previous picture along shows
+Claude the usual view; it can be switched off to save money, and the page shows the cost both ways. The key
+stays in `.env` and is never shown on the settings page.
 
 ## Alerts
 

@@ -44,6 +44,13 @@ VIDEO = {**{key: options[0] for key, options in CHOICES.items()}, **dict.fromkey
          "brightness": 0, "contrast": 100, "saturation": 100}
 LEVEL = {"make": True, "fps": 24, "from": "00:00", "to": "23:59"}  # per kind of video: speed and time-of-day window
 RETAKES, RETAKE_WAIT = 3, 30  # a blocked view gets this many more pictures, this many seconds apart
+# Claude models offered for the blocked-view check (the first is the default): name on the page, then dollars per
+# million tokens in and out, copied from https://platform.claude.com/docs/en/about-claude/pricing. CLAUDE.md says
+# when and how to bring this list up to date.
+PRICES_AS_OF = "October 2026"
+VIEW_MODELS = {"claude-opus-5-5": ("Claude Opus 5.5", 4.00, 20.00),
+               "claude-sonnet-5-5": ("Claude Sonnet 5.5", 2.00, 10.00),
+               "claude-haiku-5-5": ("Claude Haiku 5.5", 0.10, 0.50)}
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 URL = re.compile(r"rtsps?://\S+")
 
@@ -55,6 +62,8 @@ def with_defaults(cfg):
         cfg["video"] = {**VIDEO, **cfg.get("video", {})}
         cfg.setdefault("check_view", False)
         cfg.setdefault("view_notes", "")
+        cfg.setdefault("view_model", next(iter(VIEW_MODELS)))
+        cfg.setdefault("view_compare", True)
         given = cfg.get("levels", {})
         cfg["levels"] = {}
         for level in LEVELS:
@@ -107,8 +116,10 @@ def validate(cfg):
 
     if not whole(cfg.get("jpeg_quality"), 1, 100):
         errs.append("picture quality: a whole number from 1 to 100")
-    if type(cfg.get("check_view")) is not bool:
-        errs.append("check each picture: on or off")
+    if type(cfg.get("check_view")) is not bool or type(cfg.get("view_compare")) is not bool:
+        errs.append("check each picture, and its comparison picture: on or off")
+    if not isinstance(cfg.get("view_model"), str) or cfg["view_model"] not in VIEW_MODELS:
+        errs.append(f"model for the check: one of {', '.join(VIEW_MODELS)}")
     if len(cfg["view_notes"]) > 2000:
         errs.append("notes for Claude: 2,000 characters at most")
     for level in LEVELS:
@@ -243,7 +254,8 @@ def grab(cfg, images=IMAGES):
         import view  # the Claude SDK is only loaded when the check is switched on
 
         def check(jpeg, camera, usual):
-            return view.blocked(jpeg, camera, usual, cfg["view_notes"])
+            return view.blocked(jpeg, camera, usual if cfg["view_compare"] else None, cfg["view_notes"],
+                                cfg["view_model"])
     problems = []
     for cam in cfg["cameras"]:
         try:

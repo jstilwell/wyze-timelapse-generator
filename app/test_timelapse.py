@@ -157,14 +157,16 @@ FORM = {"name": ["cam1", ""], "url": ["rtsp://10.0.0.5:8554/live", ""], "times":
         "stitch_time": ["00:30"], "jpeg_quality": ["95"],
         **{f"{level}_{key}": [value] for level in t.LEVELS
            for key, value in (("make", "on"), ("fps", "24"), ("from", "00:00"), ("to", "23:59"))},
-        **{key: [str(value)] for key, value in t.VIDEO.items() if value is not False}}  # switches are left unticked
+        **{key: [str(value)] for key, value in t.VIDEO.items() if value is not False},  # switches are left unticked
+        "view_model": ["claude-opus-5-5"], "view_compare": ["on"]}
 
 
 class Form(unittest.TestCase):
     def test_round_trip_and_escaping(self):
         self.assertEqual(web.from_form(FORM), (GOOD, []))
         page = web.render({**GOOD, "stitch_time": "<script>", "cameras": [{"name": "<b>", "url": '"><i>'}]})
-        self.assertNotIn("<script>", page)
+        self.assertIn('value="&lt;script&gt;"', page)
+        self.assertEqual(page.count("<script>"), 1)  # the page's own; the injected one stayed text
         self.assertNotIn("<b>", page)
         self.assertNotIn("<i>", page)
 
@@ -219,6 +221,31 @@ class Form(unittest.TestCase):
         self.assertNotIn('name="check_view" checked', web.render(GOOD))
         self.assertEqual(len(t.validate({**GOOD, "view_notes": "x" * 2001})), 1)
         self.assertEqual(len(t.validate({**GOOD, "check_view": "yes"})), 1)
+
+    def test_model_choice_and_cost_estimates_follow_the_settings(self):
+        form = {**FORM, "view_model": ["claude-haiku-5-5"]}
+        del form["view_compare"]
+        cfg, errors = web.from_form(form)
+        self.assertEqual((cfg["view_model"], cfg["view_compare"], errors + t.validate(cfg)), ("claude-haiku-5-5", False, []))
+        self.assertEqual(len(t.validate({**GOOD, "view_model": "gpt-9"})), 1)
+        self.assertEqual(len(t.validate({**GOOD, "view_compare": "on"})), 1)
+        # GOOD: 1 camera, 2 pictures a day = 60 checks a month; 450 + 760 per picture tokens in, 250 out
+        self.assertAlmostEqual(web.monthly(GOOD, "claude-opus-5-5"), 60 * (1970 * 4 + 250 * 20) / 1e6)
+        self.assertAlmostEqual(web.monthly(GOOD, "claude-opus-5-5", compare=False), 60 * (1210 * 4 + 250 * 20) / 1e6)
+        self.assertAlmostEqual(web.monthly({**GOOD, "view_compare": False}, "claude-haiku-5-5"),
+                               60 * (1210 * 0.10 + 250 * 0.50) / 1e6)
+        busy = {**GOOD, "cameras": GOOD["cameras"] * 3, "times": ["08:00"] * 48, "view_notes": "x" * 400}
+        self.assertAlmostEqual(web.monthly(busy, "claude-sonnet-5-5"), 3 * 48 * 30 * (2070 * 2 + 250 * 10) / 1e6)
+        self.assertEqual([web.money(d) for d in (0.001, 0.034, 0.77, 1.2, 19.99, 56.4)],
+                         ["under 1¢", "3¢", "77¢", "$1.20", "$19.99", "$56"])
+        page = web.render(GOOD)
+        self.assertIn('<option value="claude-opus-5-5" selected>Claude Opus 5.5: about 77¢ a month</option>', page)
+        self.assertIn("On Claude Opus 5.5 that is about 77¢ a month with the previous picture and 59¢ without.", page)
+        self.assertIn("Estimated for 1 camera and 2 pictures a day", page)
+        for model, (name, dollars_in, _) in t.VIEW_MODELS.items():  # every model is in the comparison, with its price
+            self.assertIn(f'<th scope="row">{name}</th>', page)
+            self.assertIn(f"${dollars_in:.2f} in", page)
+        self.assertEqual(set(web.EXPECT), set(t.VIEW_MODELS))
 
     def test_look_and_per_video_settings_come_back_from_the_form(self):
         form = {**FORM, "yearly_from": ["11:00"], "yearly_to": ["13:00"], "yearly_fps": ["30"], "size": ["1080"],
@@ -306,10 +333,13 @@ class ViewCheck(unittest.TestCase):
         requests = fake_claude(self, (True, "a  cat sitting\nright in front of the lens"), (False, ""))
         self.assertEqual(view.blocked(self.frame, "cam1", self.shot, "The post is always there."),
                          "a cat sitting right in front of the lens")
-        self.assertEqual(view.blocked(self.frame, "cam1"), "")
+        self.assertEqual(view.blocked(self.frame, "cam1", model="claude-haiku-5-5"), "")
         first, second = (r["body"] for r in requests)
         self.assertEqual(first["model"], "claude-opus-5-5")
         self.assertEqual(first["fallbacks"], "default")
+        self.assertEqual(second["model"], "claude-haiku-5-5")
+        self.assertNotIn("fallbacks", second)  # Haiku has no fallback and refuses the parameter
+        self.assertNotIn("anthropic-beta", requests[1]["headers"])
         self.assertIn("server-side-fallback-2026-07-01", requests[0]["headers"]["anthropic-beta"])
         self.assertIn("sk-test-key", requests[0]["headers"]["authorization"])  # the SDK took the key from .env
         self.assertEqual(first["output_config"], {"effort": "low", "format": {"type": "json_schema",
@@ -388,6 +418,14 @@ class ViewCheck(unittest.TestCase):
         self.assertIn("cam1: the view was still blocked after 4 pictures (a ladder)", problems[0])
         self.assertEqual(len(requests), 4)
         self.assertIn("Ignore the hose.", json.dumps(requests[0]["body"]))
+
+        def pictures(request):
+            return sum(block["type"] == "image" for block in request["body"]["messages"][0]["content"])
+
+        self.assertEqual((pictures(requests[0]), requests[0]["body"]["model"]), (2, "claude-opus-5-5"))
+        fake = fake_claude(self, (False, ""))
+        t.grab({**GOOD, "check_view": True, "view_compare": False, "view_model": "claude-sonnet-5-5"}, self.images)
+        self.assertEqual((pictures(fake[0]), fake[0]["body"]["model"]), (1, "claude-sonnet-5-5"))
         self.assertGreater(len(list(self.images.rglob("cam1_*.jpg"))), 1)  # the blocked picture was still saved
 
 
@@ -464,6 +502,8 @@ class Server(unittest.TestCase):
         self.assertIn(b"Latest picture: 2026-11-05 at 08:00", body)
         self.assertEqual(r.getheader("Cache-Control"), "no-store")
         self.assertIn("frame-ancestors 'none'", r.getheader("Content-Security-Policy"))
+        self.assertIn(f"script-src {web.csp_hash(web.SCRIPT)}", r.getheader("Content-Security-Policy"))
+        self.assertEqual(body.count(b"<script>"), 1)  # only the hashed one that opens the model comparison
         self.assertEqual(self.ask("GET", "/snapshot/cam1")[:2], (200, b"jpeg bytes"))
 
     def test_only_snapshots_are_served(self):

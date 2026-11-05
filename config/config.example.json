@@ -55,5 +55,7 @@
     "saturation": 100
   },
   "check_view": false,
-  "view_notes": ""
+  "view_notes": "",
+  "view_model": "claude-opus-5-5",
+  "view_compare": true
 }

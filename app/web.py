@@ -12,8 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from rtsp_grabber import GrabError, grab_frame
-from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, RANGES, SWITCHES, URL, latest, read_config, still,
-                       validate, well_formed, with_defaults)
+from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, PRICES_AS_OF, RANGES, SWITCHES, URL, VIEW_MODELS,
+                       latest, read_config, still, validate, well_formed, with_defaults)
 
 MASK = "••••"  # shown in place of a saved camera password
 
@@ -85,6 +85,15 @@ button {
   color: var(--on-accent); background: var(--accent); border: 1px solid var(--accent); border-radius: 6px;
 }
 button.quiet { color: var(--accent); background: transparent; }
+a { color: var(--accent); }
+button.link { padding: 0; border: 0; font-size: .875rem; text-decoration: underline; color: var(--accent); background: none; }
+dialog { width: min(44rem, calc(100vw - 2rem)); padding: 1.5rem; color: var(--ink); background: var(--paper);
+  border: 1px solid var(--line); border-radius: 10px; }
+dialog::backdrop { background: rgb(0 0 0 / .55); }
+dialog p { margin-top: .75rem; }
+table { width: 100%; margin-top: 1rem; border-collapse: collapse; font-size: .875rem; font-variant-numeric: tabular-nums; }
+th, td { padding: .625rem .75rem .625rem 0; text-align: left; vertical-align: top; border-bottom: 1px solid var(--line); }
+dialog form { margin-top: 1.25rem; }
 [role=status], [role=alert] {
   margin-top: 1.5rem; padding: .75rem 1rem; background: var(--surface);
   border-left: 4px solid var(--ok); border-radius: 0 6px 6px 0;
@@ -151,13 +160,18 @@ and yearly videos.</p>
     camera is in the way, the picture is taken again half a minute later, up to three more times. Movement further
     back in the scene is left alone.</p>
     <p class="ticks"><label class="tick"><input type="checkbox" name="check_view"{check_view}>Check each picture with
-      Claude</label></p>
+      Claude</label>
+      <label class="tick"><input type="checkbox" name="view_compare"{view_compare}>Send the camera's previous
+      picture too, to show Claude the usual view</label></p>
+    <label for="view_model">Model</label>
+    <select id="view_model" name="view_model" aria-describedby="model-hint">{view_models}</select>
+    <p class="hint" id="model-hint">{cost_basis} {compare_cost}
+      <button type="button" class="link" id="models-open">Compare the models</button></p>
     <label for="view_notes">What Claude should know about your cameras</label>
     <textarea id="view_notes" name="view_notes" rows="4" maxlength="2000" aria-describedby="notes-hint"
       placeholder="The white post on the left of front-yard is always there. Birds on the feeder are fine.">{view_notes}</textarea>
     <p class="hint" id="notes-hint">Optional, and sent with every check. Checking needs an Anthropic API key in the
-    .env file (see the README) and sends each picture, shrunk, to Anthropic along with the camera's previous one.
-    Each check costs a little.</p>
+    .env file (see the README) and sends each picture, shrunk, to Anthropic.</p>
   </section>
 
   <section>
@@ -181,16 +195,41 @@ and yearly videos.</p>
     <p class="hint">Testing and previewing save nothing. A test takes up to 20 seconds.</p>
   </section>
 </form>
+<dialog id="models" aria-labelledby="models-title">
+  <h2 id="models-title">The three models</h2>
+  <p class="hint">All three can tell when something is in front of a camera. They differ in how carefully they
+  judge the hard cases, and in price.</p>
+  <table>
+    <thead><tr><th scope="col">Model</th><th scope="col">What to expect</th><th scope="col">Price per million
+      tokens</th><th scope="col">A month, with the previous picture</th><th scope="col">A month, without</th></tr></thead>
+    <tbody>{model_rows}</tbody>
+  </table>
+  <p class="hint">{cost_basis} A check is about {tokens_with:,} tokens in with the previous picture,
+  {tokens_without:,} without, and 250 out. These are estimates: the real counts are written to logs/grab.log
+  after every check. Retaken pictures are checked again and add a little. Prices are Anthropic's from {prices_as_of} and can change:
+  <a href="https://platform.claude.com/docs/en/about-claude/pricing">current prices</a>.</p>
+  <p class="hint">If Anthropic's safety filter declines a picture, Opus and Sonnet are tried again on a backup
+  model. Haiku is not; the picture is kept and the alert says it was not checked.</p>
+  <form method="dialog"><button>Close</button></form>
+</dialog>
 </main>
+<script>{script}</script>
 </body>
 </html>
 """
 
+SCRIPT = 'document.getElementById("models-open").onclick = () => document.getElementById("models").showModal();'
+
+
+def csp_hash(text):
+    return "'sha256-" + base64.b64encode(hashlib.sha256(text.encode()).digest()).decode() + "'"
+
+
 HEADERS = {
     "Cache-Control": "no-store",  # the page and the pictures are private to this machine
     "Content-Security-Policy": "default-src 'none'; img-src 'self' data:; form-action 'self'; base-uri 'none'; "
-                               "frame-ancestors 'none'; style-src 'sha256-"
-                               + base64.b64encode(hashlib.sha256(STYLE.encode()).digest()).decode() + "'",
+                               # the page's one style block and one script (it opens the model comparison)
+                               f"frame-ancestors 'none'; style-src {csp_hash(STYLE)}; script-src {csp_hash(SCRIPT)}",
     "Cross-Origin-Resource-Policy": "same-origin",
     # same-origin, not no-referrer: that one makes browsers post "Origin: null", which the CSRF guard refuses
     "Referrer-Policy": "same-origin",
@@ -399,10 +438,39 @@ def look_controls(video):
             'nothing.</p>')
 
 
+EXPECT = {"claude-opus-5-5": "The most careful judge, and Anthropic's recommended default. Best when the view is "
+                             "cluttered or your notes describe fine distinctions.",
+          "claude-sonnet-5-5": "A middle choice: quicker, and half the price of Opus.",
+          "claude-haiku-5-5": "The quickest and by far the cheapest. Fine for plain cases such as a person or a car "
+                              "right at the lens; more likely to misjudge subtle ones."}
+
+
+def check_tokens(cfg, compare):
+    """Rough tokens sent per check: the instructions and notes, plus about 760 for each picture (1024 pixels wide,
+    at about one token per 28 by 28 pixels). `compare` is whether the previous picture goes along."""
+    return 450 + len(cfg["view_notes"]) // 4 + 760 * (2 if compare else 1)
+
+
+def monthly(cfg, model, compare=None):
+    """Estimated dollars a month for checking every scheduled picture of every camera with `model`, assuming
+    about 250 tokens come back (a little thinking and a one-line verdict). `compare` defaults to the setting."""
+    _, dollars_in, dollars_out = VIEW_MODELS[model]
+    compare = cfg.get("view_compare") is True if compare is None else compare
+    checks = len(cfg["cameras"]) * len(cfg["times"]) * 30
+    return checks * (check_tokens(cfg, compare) * dollars_in + 250 * dollars_out) / 1_000_000
+
+
+def money(dollars):
+    if dollars < 0.005:
+        return "under 1¢"
+    return f"{dollars * 100:.0f}¢" if dollars < 0.995 else f"${dollars:.2f}" if dollars < 20 else f"${dollars:.0f}"
+
+
 def render(cfg, message="", saved=None, tests=None):
     """The page for a well-formed config. `saved` is the stored camera list when `cfg` is not it (a rejected or
     test submission); `tests` holds one picture slot per camera after Test cameras."""
     secret = {c["url"] for c in (cfg["cameras"] if saved is None else saved)}
+    chosen = cfg.get("view_model") if cfg.get("view_model") in VIEW_MODELS else next(iter(VIEW_MODELS))
     return PAGE.format(
         style=STYLE,
         message=message,
@@ -412,6 +480,22 @@ def render(cfg, message="", saved=None, tests=None):
         stitch_time=html.escape(cfg["stitch_time"]),
         jpeg_quality=html.escape(str(cfg.get("jpeg_quality", ""))),
         check_view=" checked" * (cfg.get("check_view") is True),
+        view_compare=" checked" * (cfg.get("view_compare") is True),
+        view_models="".join(
+            f'<option value="{model}"{" selected" * (cfg.get("view_model") == model)}>{name}: about '
+            f'{money(monthly(cfg, model))} a month</option>' for model, (name, _, _) in VIEW_MODELS.items()),
+        cost_basis=(f"Estimated for {len(cfg['cameras'])} camera{'s' * (len(cfg['cameras']) != 1)} and "
+                    f"{len(cfg['times'])} picture{'s' * (len(cfg['times']) != 1)} a day, as last saved or previewed."),
+        compare_cost=(f"On {VIEW_MODELS[chosen][0]} that is about {money(monthly(cfg, chosen, True))} a month with "
+                      f"the previous picture and {money(monthly(cfg, chosen, False))} without."),
+        prices_as_of=PRICES_AS_OF,
+        tokens_with=check_tokens(cfg, True),
+        tokens_without=check_tokens(cfg, False),
+        model_rows="".join(
+            f'<tr><th scope="row">{name}</th><td>{EXPECT[model]}</td><td>${dollars_in:.2f} in<br>${dollars_out:.2f} '
+            f'out</td><td>{money(monthly(cfg, model, True))}</td><td>{money(monthly(cfg, model, False))}</td></tr>'
+            for model, (name, dollars_in, dollars_out) in VIEW_MODELS.items()),
+        script=SCRIPT,
         view_notes=html.escape(cfg["view_notes"]),
         levels=level_rows(cfg),
         look=look_controls(cfg["video"]),
@@ -457,7 +541,8 @@ def from_form(form, saved=()):
              | {key: number(key) for key in RANGES})
     return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"),
             "jpeg_quality": number("jpeg_quality"), "levels": levels, "video": video,
-            "check_view": "check_view" in form, "view_notes": field("view_notes")}, errors
+            "check_view": "check_view" in form, "view_notes": field("view_notes"),
+            "view_model": field("view_model"), "view_compare": "view_compare" in form}, errors
 
 
 def load():

@@ -9,6 +9,17 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
   or error messages. The README is terse and readable first and foremost: plain words, short sentences,
   written for the person using the tool. No implementation detail, which belongs in code comments.
 - Run `./test.sh` before every commit. It needs only Docker.
+- **Before committing any change under `app/`, check for new Claude models and prices.** Read
+  <https://platform.claude.com/docs/en/about-claude/models/overview> and
+  <https://platform.claude.com/docs/en/about-claude/pricing>. If a current Opus, Sonnet or Haiku is not in
+  `VIEW_MODELS` (`app/timelapse.py`), or a price there is out of date, then in the same commit:
+  - update `VIEW_MODELS` (one model per tier, newest first within the tier order Opus, Sonnet, Haiku; the
+    first entry is the default) and `PRICES_AS_OF`;
+  - write its "What to expect" line in `EXPECT` (`app/web.py`). The dropdown, the cost estimates and the
+    model comparison dialog are all built from those two tables, and the tests fail if they disagree;
+  - check the model's API differences and adjust `app/view.py`: `NO_FALLBACK` lists models without a
+    server-side refusal fallback, and the dialog's closing paragraph describes that difference;
+  - keep a retired model's id working for configs that still name it, or have `with_defaults` move them on.
 - Check settings-page changes in a real browser, not only with tests (see "Trying the page").
 
 ## Layout
@@ -18,7 +29,7 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 | `app/timelapse.py` | `grab` and `stitch` jobs, the video look, config validation and defaults |
 | `app/rtsp_grabber.py` | One frame from an RTSP stream through ffmpeg |
 | `app/view.py` | The optional Claude check for a blocked view (the only code that calls the Claude API) |
-| `app/web.py` | Settings page: stdlib `http.server`, no JavaScript, no external assets |
+| `app/web.py` | Settings page: stdlib `http.server`, no external assets, and one line of JavaScript (it opens the model comparison dialog; its hash is in the CSP) |
 | `app/test_timelapse.py` | Every test. They run inside the image, where ffmpeg is. |
 | `launchd/install.sh` | Writes `.env`, starts the page, creates the LaunchAgents from `config/config.json` |
 | `launchd/run.sh` | Runs one job, logs it, sends the failure notification or the heartbeat |
