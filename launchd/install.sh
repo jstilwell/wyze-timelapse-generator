@@ -32,7 +32,7 @@ calendar() {  # HH:MM -> launchd calendar entry. Validated here because it is wr
 
 agent() {  # name, program arguments (XML), trigger (XML)
   local plist=$agents/$prefix.$1.plist
-  cat > $plist <<EOF
+  cat > $plist.new <<EOF
 <?xml version="1.0" encoding="UTF-8"?>
 <!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
 <plist version="1.0">
@@ -45,7 +45,14 @@ agent() {  # name, program arguments (XML), trigger (XML)
 </dict>
 </plist>
 EOF
-  plutil -lint -s $plist
+  plutil -lint -s $plist.new
+  # An agent that is loaded and has not changed is left alone: reloading it would stop a job that is running,
+  # and every save on the settings page comes through here.
+  if cmp -s $plist.new $plist && launchctl print gui/$UID/$prefix.$1 >/dev/null 2>&1; then
+    rm $plist.new
+    return
+  fi
+  mv $plist.new $plist
   unload $1
   launchctl bootstrap gui/$UID $plist
 }
