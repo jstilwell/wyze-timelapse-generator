@@ -1,8 +1,9 @@
 """Wyze timelapse jobs.
 
 grab   - one validated, EXIF-tagged snapshot per camera
-stitch - turn finished days into daily videos, then roll them up into weekly, monthly and yearly ones
+stitch - build the daily, weekly, monthly and yearly videos whose period has ended, each straight from the pictures
 """
+import calendar
 import io
 import json
 import os
@@ -23,18 +24,53 @@ CONFIG = Path("/config/config.json")
 IMAGES, VIDEOS = Path("/images"), Path("/videos")
 LEVELS = ["daily", "weekly", "monthly", "yearly"]
 HHMM = re.compile(r"([01]\d|2[0-3]):[0-5]\d")
+SHOT = re.compile(r"[a-z0-9_-]+_(\d{4})-(0[1-9]|1[0-2])-(\d\d)_(\d\d)-(\d\d)-\d\d\.jpg")  # the names snapshot() gives
+FONT = "/usr/share/fonts/truetype/dejavu/DejaVuSans-Bold.ttf"  # installed by the Dockerfile
+
+# The look of the videos. Each setting is a fixed choice (the first is the default), a switch or a bounded
+# number, so nothing typed on the settings page ever reaches ffmpeg as text.
+CHOICES = {
+    "size": ("original", "2160", "1080", "720"),  # height in lines; never enlarges
+    "shape": ("original", "16:9", "4:3", "1:1", "9:16"),  # cut from the middle of the picture
+    "turn": ("none", "right", "upside-down", "left"),
+    "format": ("h264", "h265"),
+    "quality": ("high", "medium", "small"),
+    "blend": ("off", "light", "strong"),
+    "stamp": ("off", "date", "datetime"),
+}
+SWITCHES = ("mirror", "deflicker", "denoise", "sharpen")
+RANGES = {"brightness": (-50, 50), "contrast": (50, 200), "saturation": (0, 300)}  # 0, 100 and 100 change nothing
+VIDEO = {**{key: options[0] for key, options in CHOICES.items()}, **dict.fromkeys(SWITCHES, False),
+         "brightness": 0, "contrast": 100, "saturation": 100}
+LEVEL = {"make": True, "fps": 24, "from": "00:00", "to": "23:59"}  # per kind of video: speed and time-of-day window
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 URL = re.compile(r"rtsps?://\S+")
 
 
+def with_defaults(cfg):
+    """Fill in what an older or hand-written config leaves out. A top-level `fps` is the old single speed."""
+    if isinstance(cfg, dict) and isinstance(cfg.get("video", {}), dict) and isinstance(cfg.get("levels", {}), dict):
+        fps = cfg.pop("fps", LEVEL["fps"])
+        cfg["video"] = {**VIDEO, **cfg.get("video", {})}
+        given = cfg.get("levels", {})
+        cfg["levels"] = {}
+        for level in LEVELS:
+            own = given.get(level, {})
+            cfg["levels"][level] = {**LEVEL, "fps": fps, **own} if isinstance(own, dict) else own
+    return cfg
+
+
 def read_config():
     path = CONFIG if CONFIG.exists() else CONFIG.with_name("config.example.json")
-    return json.loads(path.read_text())
+    return with_defaults(json.loads(path.read_text()))
 
 
 def well_formed(cfg):
     """True when every setting is the right kind of value, so validate() and the settings page can read it."""
-    return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str)
+    return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str) and isinstance(cfg.get("video"), dict)
+            and isinstance(cfg.get("levels"), dict)
+            and all(isinstance(cfg["levels"].get(level), dict) and isinstance(cfg["levels"][level].get("from"), str)
+                    and isinstance(cfg["levels"][level].get("to"), str) for level in LEVELS)
             and isinstance(cfg.get("cameras"), list) and isinstance(cfg.get("times"), list)
             and all(isinstance(c, dict) and all(isinstance(c.get(key, default), str) for key, default in
                                                 (("name", None), ("url", None), ("cert", ""), ("cert_host", "")))
@@ -62,9 +98,24 @@ def validate(cfg):
         errs.append("snapshot times: one or more different 24-hour HH:MM values")
     if not HHMM.fullmatch(cfg["stitch_time"]):
         errs.append("video build time: a 24-hour HH:MM value")
-    for key, lo, hi in (("fps", 1, 60), ("jpeg_quality", 1, 100)):
-        if not (type(cfg.get(key)) is int and lo <= cfg[key] <= hi):
-            errs.append(f"{key}: a whole number from {lo} to {hi}")
+    def whole(value, lo, hi):
+        return type(value) is int and lo <= value <= hi
+
+    if not whole(cfg.get("jpeg_quality"), 1, 100):
+        errs.append("picture quality: a whole number from 1 to 100")
+    for level in LEVELS:
+        own = cfg["levels"][level]
+        if type(own.get("make")) is not bool or not whole(own.get("fps"), 1, 60):
+            errs.append(f"{level} videos: pictures per second is a whole number from 1 to 60")
+        window = own.get("from"), own.get("to")
+        if not (all(isinstance(t, str) and HHMM.fullmatch(t) for t in window) and window[0] <= window[1]):
+            errs.append(f"{level} videos: the picture window needs a From and a later To, as 24-hour HH:MM")
+    video = cfg["video"]
+    errs += [f"video {key}: one of {', '.join(options)}" for key, options in CHOICES.items()
+             if not isinstance(video.get(key), str) or video[key] not in options]
+    errs += [f"video {key}: on or off" for key in SWITCHES if type(video.get(key)) is not bool]
+    errs += [f"video {key}: a whole number from {lo} to {hi}" for key, (lo, hi) in RANGES.items()
+             if not whole(video.get(key), lo, hi)]
     return errs
 
 
@@ -154,90 +205,129 @@ def grab(cfg, images=IMAGES):
 # ---- stitch --------------------------------------------------------------------------------------------------------
 
 def bucket(level, d):
-    """Name of the video that date `d` belongs to at `level`.
-
-    Weeks are ISO weeks, and a week belongs to the month and year of its Thursday, so every day ends up
-    in exactly one weekly, one monthly and one yearly video even though weeks straddle month ends.
-    """
+    """Name of the video that date `d` belongs to at `level`. Weeks are ISO weeks (Monday to Sunday)."""
     y, w, _ = d.isocalendar()
-    thursday = date.fromisocalendar(y, w, 4)
-    return {"daily": d.isoformat(), "weekly": f"{y}-W{w:02}", "monthly": f"{thursday:%Y-%m}", "yearly": str(y)}[level]
+    return {"daily": d.isoformat(), "weekly": f"{y}-W{w:02}", "monthly": f"{d:%Y-%m}", "yearly": f"{d:%Y}"}[level]
 
 
-def parent(level, key):
-    """The bucket one level up that the bucket `key` rolls into."""
-    if level == "daily":
-        return bucket("weekly", date.fromisoformat(key))
-    if level == "weekly":
-        return bucket("monthly", date.fromisocalendar(int(key[:4]), int(key[6:]), 4))
-    return key[:4]
+def look(video, still=False):
+    """The ffmpeg filter chain for the chosen look, made only of fixed pieces picked by validated settings.
+    `still` leaves out the two filters that work across neighbouring frames (for the settings page preview)."""
+    chain = list({"none": [], "right": ["transpose=1"], "upside-down": ["hflip", "vflip"],
+                  "left": ["transpose=2"]}[video["turn"]])
+    if video["mirror"]:
+        chain.append("hflip")
+    if video["shape"] != "original":
+        w, h = video["shape"].split(":")
+        chain.append(f"crop='min(iw,ih*{w}/{h})':'min(ih,iw*{h}/{w})'")
+    # shortcut: with Size and Shape left as the camera's, the frame follows the pictures, so a video whose
+    # pictures change resolution part-way fails to build; choosing a Size and a Shape makes every frame equal.
+    height = "ih" if video["size"] == "original" else f"min(ih,{video['size']})"
+    chain.append(f"scale=-2:'2*trunc({height}/2)':flags=lanczos")  # the encoders need even sizes
+    if video["deflicker"] and not still:
+        chain.append("deflicker=mode=pm:size=10")
+    if video["denoise"]:
+        chain.append("hqdn3d")
+    if video["blend"] != "off" and not still:
+        # tmix drops the per-frame stamp text; laying its output over the untouched frames keeps it
+        frames = {"light": 3, "strong": 6}[video["blend"]]
+        chain.append(f"split[sharp][mix];[mix]tmix=frames={frames}[mixed];[sharp][mixed]overlay")
+    tone = [video[key] / 100 for key in ("brightness", "contrast", "saturation")]
+    if tone != [0, 1, 1]:
+        chain.append("eq=brightness={}:contrast={}:saturation={}".format(*tone))
+    if video["sharpen"]:
+        chain.append("unsharp=5:5:0.8")
+    if video["stamp"] != "off":
+        chain.append(f"drawtext=fontfile={FONT}:text='%{{metadata\\:stamp}}':fontsize=h/30:fontcolor=white"
+                     ":borderw=2:bordercolor=black@0.7:x=h/40:y=h-th-h/40")
+    return ",".join(chain)
 
 
-def build(parts, out, fps, title):
-    """Make `out` from images (encode) or videos (lossless join), fully decode the result, then move it into place."""
+def encode(shots, fps, video, output, still=False):
+    """Run ffmpeg over the pictures `shots` (SHOT-named paths, in order) with the look applied. `output` is the
+    encoder and destination arguments. Each picture carries its date as text for the stamp to print."""
+    lines = ["ffconcat version 1.0"]
+    for shot in shots:
+        year, month, day, hour, minute = SHOT.fullmatch(shot.name).groups()
+        text = f"{int(day)} {calendar.month_abbr[int(month)]} {year}" + f" {hour}:{minute}" * (video["stamp"] == "datetime")
+        lines += [f"file '{shot}'", f"file_packet_meta stamp '{text}'"]
+    with tempfile.NamedTemporaryFile("w", suffix=".txt") as listing:
+        listing.write("\n".join(lines) + "\n")
+        listing.flush()
+        # -r as an input option: one frame per picture at exactly this speed, whatever the files' own timing says
+        return subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", "-r", str(fps), "-f", "concat", "-safe", "0",
+                               "-i", listing.name, "-vf", look(video, still), *output], capture_output=True)
+
+
+def still(shot, video):
+    """One picture with the look applied, as JPEG bytes no taller than 720 lines: the settings page preview."""
+    small = {**video, "size": "720"}
+    r = encode([shot], 1, small, ["-frames:v", "1", "-c:v", "mjpeg", "-q:v", "4", "-f", "image2pipe", "-"], still=True)
+    if r.returncode or not r.stdout:
+        raise RuntimeError(r.stderr.decode(errors="replace").strip()[-300:] or "ffmpeg produced no picture")
+    return r.stdout
+
+
+def build(shots, out, fps, video, title):
+    """Encode the pictures into `out`, fully decode the result, then move it into place."""
     out.parent.mkdir(parents=True, exist_ok=True)
     part = out.with_suffix(".part")
-    meta = ["-metadata", f"title={title}",
-            "-metadata", f"creation_time={datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}",
-            "-movflags", "+faststart", "-f", "mp4", str(part)]
-    with tempfile.NamedTemporaryFile("w", suffix=".txt") as listing:
-        if parts[0].suffix == ".jpg":
-            expected = len(parts)
-            source = ["-framerate", str(fps), "-pattern_type", "glob", "-i", str(parts[0].parent / "*.jpg"),
-                      # no B-frames: keeps timestamps simple so the joins higher up are seamless
-                      "-c:v", "libx264", "-crf", "18", "-bf", "0", "-pix_fmt", "yuv420p",
-                      "-metadata", f"comment={expected} snapshots at {fps} fps"]
-        else:
-            # shortcut: stream copy needs every part to share resolution and codec settings; if a camera's
-            # resolution changes the join fails validation below, switch this to a re-encode then.
-            expected = sum(probe(p)["nb_read_frames"] for p in parts)
-            listing.write("".join(f"file '{p}'\n" for p in parts))
-            listing.flush()
-            source = ["-f", "concat", "-safe", "0", "-i", listing.name, "-c", "copy",
-                      "-metadata", f"comment={expected} frames joined from {len(parts)} videos"]
-        r = subprocess.run(["ffmpeg", "-v", "error", "-nostdin", "-y", *source, *meta], capture_output=True, text=True)
+    quality = ("high", "medium", "small").index(video["quality"])
+    codec = {"h264": ["-c:v", "libx264", "-crf", ("18", "23", "28")[quality]],
+             # hvc1 is the tag Apple players expect; x265 chats on stderr unless told not to
+             "h265": ["-c:v", "libx265", "-crf", ("22", "26", "30")[quality], "-tag:v", "hvc1",
+                      "-x265-params", "log-level=error"]}[video["format"]]
+    r = encode(shots, fps, video, [
+        *codec, "-pix_fmt", "yuv420p", "-metadata", f"title={title}",
+        "-metadata", f"comment={len(shots)} snapshots at {fps} fps",
+        "-metadata", f"creation_time={datetime.now(timezone.utc):%Y-%m-%dT%H:%M:%SZ}",
+        "-movflags", "+faststart", "-f", "mp4", str(part)])
     try:
-        if r.returncode or r.stderr.strip():
-            why = r.stderr.strip()[-300:]
-            for p in parts:  # name the damaged file, so the person reading the alert knows what to delete
+        why = r.stderr.decode(errors="replace").strip()[-300:]
+        if r.returncode or why:
+            for shot in shots:  # name the damaged file, so the person reading the alert knows what to delete
                 try:
-                    probe(p)
+                    probe(shot)
                 except ValueError as e:
                     why = str(e)
                     break
             raise RuntimeError(f"ffmpeg failed building {out.name}: {why}")
         frames = probe(part)["nb_read_frames"]
-        if frames != expected:
-            raise RuntimeError(f"{out.name} has {frames} frames, expected {expected}")
+        if frames != len(shots):
+            raise RuntimeError(f"{out.name} has {frames} frames, expected {len(shots)}")
         os.replace(part, out)
     finally:
         part.unlink(missing_ok=True)
 
 
 def stitch(cfg, today, images=IMAGES, videos=VIDEOS):
-    """Build every missing video whose period has ended. Safe to re-run: it catches up on anything a missed run left."""
+    """Build every missing video whose period has ended. Safe to re-run: it catches up on anything a missed run
+    left, and a video that fails is reported and tried again next time without holding up the others."""
     problems = []
     for cam in (c["name"] for c in cfg["cameras"]):
         days = sorted(d for d in (images / cam).glob("????-??-??") if d.name < today.isoformat())
-        try:
-            groups = {d.name: sorted(d.glob("*.jpg")) for d in days}
-            for i, level in enumerate(LEVELS):
-                for key, parts in groups.items():
-                    out = videos / cam / level / f"{cam}_{key}.mp4"
-                    if parts and not out.exists():
-                        build(parts, out, cfg["fps"], f"{cam} {level} timelapse {key}")
+        for level in LEVELS:
+            own = cfg["levels"][level]
+            groups = {}
+            for day in days if own["make"] else ():
+                try:
+                    key = bucket(level, date.fromisoformat(day.name))
+                except ValueError:  # a folder that only looks like a date
+                    continue
+                if key < bucket(level, today):
+                    groups.setdefault(key, []).append(day)
+            for key, folders in groups.items():
+                out = videos / cam / level / f"{cam}_{key}.mp4"
+                if out.exists():
+                    continue
+                shots = [p for folder in folders for p in sorted(folder.glob("*.jpg")) if SHOT.fullmatch(p.name)
+                         and own["from"] <= p.stem[-8:-3].replace("-", ":") <= own["to"]]
+                try:
+                    if shots:
+                        build(shots, out, own["fps"], cfg["video"], f"{cam} {level} timelapse {key}")
                         print("built", out)
-                if level == "yearly":
-                    break
-                # Next level up: this level's videos grouped by parent bucket, for parents that have ended.
-                groups = {}
-                for video in sorted((videos / cam / level).glob(f"{cam}_*.mp4")):
-                    up = parent(level, video.stem[len(cam) + 1:])
-                    if up < bucket(LEVELS[i + 1], today):
-                        groups.setdefault(up, []).append(video)
-        except Exception as e:
-            # Stopping here keeps a longer video from being built over a hole; the next run retries.
-            problems.append(f"{cam}: {e}")
+                except Exception as e:
+                    problems.append(f"{cam}: {e}")
         yesterday = (today - timedelta(days=1)).isoformat()
         got = len(list((images / cam / yesterday).glob("*.jpg")))
         if got < len(cfg["times"]) and any(d.name < yesterday for d in days):  # skip a camera's first day
@@ -246,8 +336,9 @@ def stitch(cfg, today, images=IMAGES, videos=VIDEOS):
 
 
 if __name__ == "__main__":
-    signal.alarm(3600)  # a hung camera or ffmpeg has to end as a failure, not as silence
     job = sys.argv[1] if len(sys.argv) > 1 else ""
+    # a hung camera or ffmpeg has to end as a failure, not as silence; a year of pictures can take hours to encode
+    signal.alarm(3600 if job == "grab" else 8 * 3600)
     if job not in ("grab", "stitch"):
         sys.exit("usage: timelapse.py grab|stitch")
     try:

@@ -34,12 +34,23 @@ it missed.
 To use other folders, such as an external drive: run `open -e .env`, change `IMAGES_PATH` and
 `VIDEOS_PATH` to folders that exist, and run `./launchd/install.sh` again.
 
-Once a night, yesterday's video is built. When a week, month or year has just ended, the shorter videos
-are joined into the longer one without losing quality. After nights when the Mac was off, the next run
-catches up.
+Once a night, a video is built for every day, week, month or year that has just ended, straight from that
+period's pictures. Keep the pictures: the videos are made from them. After nights when the Mac was off, the
+next run catches up. Weeks run Monday to Sunday. A year of pictures can take a while to build.
 
-Weeks run Monday to Sunday. A week that crosses a month end belongs to the month its Thursday is in, so a
-monthly video can start or end up to three days off the calendar month. No day is left out or shown twice.
+## Tuning the videos
+
+All on the settings page:
+
+- **Videos.** For daily, weekly, monthly and yearly videos separately: whether to make them, how fast they
+  play, and which part of the day their pictures come from. A yearly video made only from pictures taken
+  between 11:00 and 13:00 shows the seasons without day and night flashing past.
+- **Look.** Size, shape, turning and mirroring, format, quality, flicker smoothing, blending, grain
+  reduction, sharpening, brightness, contrast, colour strength, and a date stamp in the corner.
+- **Preview look** shows the result on each camera's latest picture without saving anything.
+
+Changes apply to videos built from then on. To remake a video, delete its file and run
+`./launchd/run.sh stitch`, or wait for the next night.
 
 ## Alerts
 

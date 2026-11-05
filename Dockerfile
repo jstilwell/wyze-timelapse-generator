@@ -6,6 +6,11 @@ FROM ghcr.io/astral-sh/uv:0.13.7-python3.13-trixie-slim@sha256:6ff812e34a0e14b4b
 
 COPY --from=ffmpeg /ffmpeg /ffprobe /usr/local/bin/
 
+# The font for the date stamp on videos. Versions are pinned; apt checks the packages against Debian's signatures.
+RUN apt-get update \
+ && apt-get install -y --no-install-recommends fonts-dejavu-core=2.37-8 fonts-dejavu-mono=2.37-8 \
+ && rm -rf /var/lib/apt/lists/*
+
 COPY requirements.txt /tmp/requirements.txt
 RUN uv pip install --system --no-cache --require-hashes -r /tmp/requirements.txt
 

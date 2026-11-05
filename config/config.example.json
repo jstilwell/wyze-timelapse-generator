@@ -11,6 +11,47 @@
     "16:00"
   ],
   "stitch_time": "00:30",
-  "fps": 24,
-  "jpeg_quality": 95
+  "jpeg_quality": 95,
+  "levels": {
+    "daily": {
+      "make": true,
+      "fps": 24,
+      "from": "00:00",
+      "to": "23:59"
+    },
+    "weekly": {
+      "make": true,
+      "fps": 24,
+      "from": "00:00",
+      "to": "23:59"
+    },
+    "monthly": {
+      "make": true,
+      "fps": 24,
+      "from": "00:00",
+      "to": "23:59"
+    },
+    "yearly": {
+      "make": true,
+      "fps": 24,
+      "from": "00:00",
+      "to": "23:59"
+    }
+  },
+  "video": {
+    "size": "original",
+    "shape": "original",
+    "turn": "none",
+    "format": "h264",
+    "quality": "high",
+    "blend": "off",
+    "stamp": "off",
+    "mirror": false,
+    "deflicker": false,
+    "denoise": false,
+    "sharpen": false,
+    "brightness": 0,
+    "contrast": 100,
+    "saturation": 100
+  }
 }

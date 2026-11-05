@@ -15,7 +15,7 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 
 | Path | What it is |
 | --- | --- |
-| `app/timelapse.py` | `grab` and `stitch` jobs, config validation |
+| `app/timelapse.py` | `grab` and `stitch` jobs, the video look, config validation and defaults |
 | `app/rtsp_grabber.py` | One frame from an RTSP stream through ffmpeg |
 | `app/web.py` | Settings page: stdlib `http.server`, no JavaScript, no external assets |
 | `app/test_timelapse.py` | Every test. They run inside the image, where ffmpeg is. |
@@ -27,8 +27,8 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 
 ## Rules that are easy to break
 
-- Python standard library only, plus `piexif`. Images, packages and CI actions are pinned by digest or
-  hash; Dependabot moves them.
+- Python standard library only, plus `piexif`, and the DejaVu font package for the date stamp. Images,
+  packages and CI actions are pinned by digest, hash or version; Dependabot moves all but the font.
 - The page answers only as `localhost` (Host check) and accepts a POST only with a matching `Origin`. Do
   not set `Referrer-Policy: no-referrer`: browsers then send `Origin: null` and the page's own form is
   refused. Unit tests cannot see this.
@@ -40,8 +40,12 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 - Output is written to a `.part` or `.tmp` name, validated, then moved into place with `os.replace`.
 - Jobs report each failure as one `PROBLEM:` line and exit non-zero; `run.sh` turns those into alerts.
 - Containers run read-only, as `nobody`, with no capabilities. `/tmp` is the only scratch space.
-- A snapshot folder for today is never stitched; a failed build stops that camera's chain so no longer
-  video is built over a hole.
+- Every video is encoded straight from the pictures of its own period, never joined from shorter videos,
+  and only once that period has ended. One video failing does not stop the others.
+- The look of the videos is set only through fixed choices, switches and bounded numbers (`CHOICES`,
+  `SWITCHES`, `RANGES` in `timelapse.py`), and `look()` assembles fixed filter text from them. Do not add a
+  free-text ffmpeg field: that was decided against on 2026-11-05. A new option needs a test that builds a
+  video with it.
 
 ## Trying the page
 

@@ -1,4 +1,5 @@
 """Run inside the image: docker compose run --rm --entrypoint python stitch -m unittest discover -s /app -v"""
+import base64
 import http.client
 import json
 import socket
@@ -17,8 +18,21 @@ import timelapse as t
 from rtsp_grabber import GrabError, grab_frame
 import web
 
-GOOD = {"cameras": [{"name": "cam1", "url": "rtsp://10.0.0.5:8554/live"}], "times": ["08:00", "12:00"],
-        "stitch_time": "00:30", "fps": 24, "jpeg_quality": 95}
+# written the old way, with one speed for everything: with_defaults turns it into today's layout
+GOOD = t.with_defaults({"cameras": [{"name": "cam1", "url": "rtsp://10.0.0.5:8554/live"}], "times": ["08:00", "12:00"],
+                        "stitch_time": "00:30", "fps": 24, "jpeg_quality": 95})
+
+
+def changed(video=None, **levels):
+    """GOOD with some look settings and some per-kind-of-video settings replaced."""
+    return {**GOOD, "video": {**GOOD["video"], **(video or {})},
+            "levels": {level: {**GOOD["levels"][level], **levels.get(level, {})} for level in t.LEVELS}}
+
+
+def stream(path, entry):
+    r = subprocess.run(["ffprobe", "-v", "error", "-select_streams", "v:0", "-show_entries", f"stream={entry}",
+                        "-of", "csv=p=0", str(path)], capture_output=True, text=True, check=True)
+    return r.stdout.strip()
 
 
 # Throwaway self-signed certificates for CN/SAN camera.test, made for these tests only and used nowhere else:
@@ -92,22 +106,10 @@ def jpeg(path, seed=0):
 
 
 class Buckets(unittest.TestCase):
-    def test_week_straddling_new_year_stays_in_one_bucket_per_level(self):
-        # Fri 2027-01-01 is in ISO week 2026-W53, whose Thursday is 2026-12-31
-        d = date(2027, 1, 1)
-        self.assertEqual([t.bucket(level, d) for level in t.LEVELS], ["2027-01-01", "2026-W53", "2026-12", "2026"])
-        self.assertEqual(t.parent("daily", "2027-01-01"), "2026-W53")
-        self.assertEqual(t.parent("weekly", "2026-W53"), "2026-12")
-        self.assertEqual(t.parent("monthly", "2026-12"), "2026")
-
-    def test_every_day_rolls_up_consistently(self):
-        d = date(2024, 12, 1)
-        while d < date(2028, 2, 1):
-            week = t.parent("daily", d.isoformat())
-            month = t.parent("weekly", week)
-            self.assertEqual((week, month, t.parent("monthly", month)),
-                             (t.bucket("weekly", d), t.bucket("monthly", d), t.bucket("yearly", d)))
-            d += timedelta(days=1)
+    def test_weeks_are_iso_weeks_and_months_and_years_are_the_calendars(self):
+        # Fri 2027-01-01 is in ISO week 2026-W53
+        self.assertEqual([t.bucket(level, date(2027, 1, 1)) for level in t.LEVELS],
+                         ["2027-01-01", "2026-W53", "2027-01", "2027"])
 
 
 class Config(unittest.TestCase):
@@ -120,19 +122,39 @@ class Config(unittest.TestCase):
                        {"cameras": [{"name": "cam1", "url": "http://x/live"}]},
                        {"cameras": GOOD["cameras"] * 2},
                        {"times": ["8:00"]}, {"times": ["25:00"]}, {"times": []},
-                       {"stitch_time": "nope"}, {"fps": 0}, {"fps": "24"}, {"fps": True}, {"jpeg_quality": 101}):
+                       {"stitch_time": "nope"}, {"jpeg_quality": 101}):
             self.assertTrue(t.validate({**GOOD, **change}), change)
+        for cfg in (changed(daily={"fps": 0}), changed(daily={"fps": "24"}), changed(daily={"fps": True}),
+                    changed(yearly={"make": "yes"}), changed(weekly={"from": "13:00", "to": "11:00"}),
+                    changed(weekly={"to": "noon"}), changed({"size": "8000"}), changed({"size": ["1080"]}),
+                    changed({"stamp": "date':x"}), changed({"mirror": "on"}), changed({"contrast": 500}),
+                    changed({"brightness": 1.5})):
+            self.assertEqual(len(t.validate(cfg)), 1, cfg)
+
+    def test_older_config_files_keep_working(self):
+        old = {"cameras": GOOD["cameras"], "times": ["08:00"], "stitch_time": "00:30", "fps": 12, "jpeg_quality": 90}
+        cfg = t.with_defaults(dict(old))
+        self.assertEqual(t.validate(cfg), [])
+        self.assertEqual({own["fps"] for own in cfg["levels"].values()}, {12})
+        self.assertEqual(cfg["video"], t.VIDEO)
+        part = t.with_defaults({**old, "levels": {"yearly": {"from": "11:00"}}, "video": {"stamp": "date"}})
+        self.assertEqual((part["levels"]["yearly"], part["levels"]["daily"]["from"], part["video"]["stamp"]),
+                         ({"make": True, "fps": 12, "from": "11:00", "to": "23:59"}, "00:00", "date"))
 
     def test_hand_edited_nonsense_is_a_problem_not_a_crash(self):
         for cfg in ([], "x", {}, {**GOOD, "cameras": "cam1"}, {**GOOD, "cameras": [5]},
                     {**GOOD, "cameras": [{"name": 5, "url": None}]}, {**GOOD, "times": [8]}, {**GOOD, "times": None},
-                    {**GOOD, "stitch_time": 30}):
+                    {**GOOD, "stitch_time": 30}, {**GOOD, "video": []}, {**GOOD, "levels": {"daily": 5}},
+                    changed(daily={"from": 8}), t.with_defaults({"video": 3})):
             self.assertEqual(len(t.validate(cfg)), 1, cfg)
 
 
 SECRET = "rtsp://admin:hunter2@10.0.0.5/live"
 FORM = {"name": ["cam1", ""], "url": ["rtsp://10.0.0.5:8554/live", ""], "times": ["08:00, 12:00"],
-        "stitch_time": ["00:30"], "fps": ["24"], "jpeg_quality": ["95"]}
+        "stitch_time": ["00:30"], "jpeg_quality": ["95"],
+        **{f"{level}_{key}": [value] for level in t.LEVELS
+           for key, value in (("make", "on"), ("fps", "24"), ("from", "00:00"), ("to", "23:59"))},
+        **{key: [str(value)] for key, value in t.VIDEO.items() if value is not False}}  # switches are left unticked
 
 
 class Form(unittest.TestCase):
@@ -184,10 +206,31 @@ class Form(unittest.TestCase):
                            ("rtsp://10.0.0.5:7441/abc", {}), ("rtsps://10.0.0.5:7441/abc", {"repin": ["0"]})):
             self.assertNotIn("cert", camera(url, **extra), (url, extra))
 
+    def test_look_and_per_video_settings_come_back_from_the_form(self):
+        form = {**FORM, "yearly_from": ["11:00"], "yearly_to": ["13:00"], "yearly_fps": ["30"], "size": ["1080"],
+                "stamp": ["datetime"], "deflicker": ["on"], "brightness": ["-10"]}
+        del form["daily_make"]
+        cfg, errors = web.from_form(form)
+        self.assertEqual((errors, t.validate(cfg)), ([], []))
+        self.assertEqual(cfg, changed({"size": "1080", "stamp": "datetime", "deflicker": True, "brightness": -10},
+                                      daily={"make": False}, yearly={"from": "11:00", "to": "13:00", "fps": 30}))
+        page = web.render(cfg)
+        for shown in ('name="deflicker" checked', 'value="1080" selected', 'id="yearly_from" name="yearly_from" '
+                      'type="time" value="11:00"', 'id="brightness" name="brightness" type="number" min="-50" '
+                      'max="50" value="-10"'):
+            self.assertIn(shown, page)
+        self.assertNotIn('name="daily_make" checked', page)
+        # anything that is not one of the offered choices is refused, so nothing typed reaches ffmpeg
+        cfg, _ = web.from_form({**FORM, "shape": ["16:9,drawtext=textfile=/config/config.json"]})
+        self.assertEqual(len(t.validate(cfg)), 1)
+
     def test_video_lengths(self):
-        self.assertIn("0.1 seconds", web.lengths({**GOOD, "times": ["08:00", "12:00", "16:00"]}))
-        self.assertIn("a year's for about 15.2 minutes", web.lengths({**GOOD, "times": ["08:00"] * 60}))
-        self.assertEqual(web.lengths({**GOOD, "fps": "x"}), "")
+        self.assertIn("2 pictures a day: plays for about 0.1 seconds", web.plays(GOOD, "daily"))
+        self.assertIn("30 seconds", web.plays(GOOD, "yearly"))
+        self.assertIn("1 picture a day: plays for about 73 seconds",
+                      web.plays(changed(yearly={"from": "11:00", "to": "13:00", "fps": 5}), "yearly"))
+        self.assertIn("No picture time", web.plays(changed(weekly={"from": "20:00"}), "weekly"))
+        self.assertEqual(web.plays(changed(daily={"make": False}), "daily"), "Not made.")
 
 
 class Pinning(unittest.TestCase):
@@ -279,10 +322,10 @@ class Server(unittest.TestCase):
         self.assertEqual(self.config.read_text(), before)
 
     def test_save_keeps_the_masked_password_and_redirects(self):
-        status, _, r = self.ask("POST", "/", {**FORM, "url": [web.mask(SECRET), ""], "fps": ["12"]})
+        status, _, r = self.ask("POST", "/", {**FORM, "url": [web.mask(SECRET), ""], "yearly_fps": ["12"]})
         self.assertEqual((status, r.getheader("Location")), (303, "/?saved"))
         saved = json.loads(self.config.read_text())
-        self.assertEqual((saved["cameras"][0]["url"], saved["fps"]), (SECRET, 12))
+        self.assertEqual((saved["cameras"][0]["url"], saved["levels"]["yearly"]["fps"]), (SECRET, 12))
         self.assertIn(b"Settings saved", self.ask("GET", "/?saved")[1])
 
     def test_rejected_save_changes_nothing_and_says_why(self):
@@ -322,6 +365,20 @@ class Server(unittest.TestCase):
         self.assertEqual(status, 400)
         self.assertIn(b"certificate could not be read", body)
         self.assertEqual(json.loads(self.config.read_text())["cameras"][0], camera)
+
+    def test_preview_shows_the_look_on_the_latest_picture_without_saving(self):
+        before = self.config.read_text()
+        form = {**FORM, "url": [web.mask(SECRET), ""], "shape": ["1:1"], "stamp": ["datetime"], "blend": ["strong"],
+                "deflicker": ["on"], "action": ["preview"]}
+        self.assertIn(b"The preview could not be made", self.ask("POST", "/", form)[1])  # the stand-in is no JPEG
+        jpeg(self.shot)
+        body = self.ask("POST", "/", form)[1].decode()
+        self.assertIn("Preview made. Nothing was saved.", body)
+        picture = base64.b64decode(body.split('src="data:image/jpeg;base64,')[1].split('"')[0])
+        self.assertEqual(t.probe(picture), {"nb_read_frames": 1, "width": 240, "height": 240})  # 320x240, squared
+        self.assertEqual(self.config.read_text(), before)
+        # a preview of settings that would not be saved says why instead
+        self.assertIn(b"Not saved", self.ask("POST", "/", {**form, "size": ["huge"]})[1])
 
     def test_camera_test_shows_the_live_picture(self):
         old = web.grab_frame
@@ -371,45 +428,93 @@ class Media(unittest.TestCase):
             grab_frame("rtsp://admin:hunter2@127.0.0.1:1/live", timeout=3)
         self.assertNotIn("hunter2", str(caught.exception))
 
-    def test_stitch_builds_every_level_and_reports_problems(self):
-        # two snapshots a day from Mon 2025-12-01 to Tue 2026-01-06, "today" is Mon 2026-02-02
-        day, n = date(2025, 12, 1), 0
-        while day <= date(2026, 1, 6):
-            for hour in ("08", "12"):
+    def fill(self, first, last, hours=("08", "12")):
+        day, n = first, 0
+        while day <= last:
+            for hour in hours:
                 jpeg(self.images / "cam1" / day.isoformat() / f"cam1_{day}_{hour}-00-00.jpg", n)
                 n += 1
             day += timedelta(days=1)
+
+    def names(self, level):
+        return sorted(p.name for p in (self.videos / "cam1" / level).iterdir())
+
+    def test_stitch_builds_every_kind_of_video_and_reports_problems(self):
+        # two snapshots a day from Mon 2025-12-01 to Tue 2026-01-06, "today" is Mon 2026-02-02
+        self.fill(date(2025, 12, 1), date(2026, 1, 6))
+        (self.images / "cam1" / "2025-12-03" / "IMG_0001.jpg").write_bytes(b"dropped in by hand, not a snapshot")
         today = date(2026, 2, 2)
         self.assertEqual(t.stitch(GOOD, today, self.images, self.videos),
                          ["cam1: only 0 of 2 snapshots were taken on 2026-02-01"])
-
-        def names(level):
-            return sorted(p.name for p in (self.videos / "cam1" / level).iterdir())
-
-        self.assertEqual(len(names("daily")), 37)
-        self.assertEqual(names("weekly"), [f"cam1_2025-W{w}.mp4" for w in (49, 50, 51, 52)]
+        self.assertEqual(len(self.names("daily")), 37)
+        self.assertEqual(self.names("weekly"), [f"cam1_2025-W{w}.mp4" for w in (49, 50, 51, 52)]
                          + ["cam1_2026-W01.mp4", "cam1_2026-W02.mp4"])
-        self.assertEqual(names("monthly"), ["cam1_2025-12.mp4", "cam1_2026-01.mp4"])
-        self.assertEqual(names("yearly"), ["cam1_2025.mp4"])  # 2026 has not ended
-        # every frame survives each roll-up: Dec 1-28 is the four full weeks whose Thursday is in December
-        self.assertEqual(t.probe(self.videos / "cam1" / "yearly" / "cam1_2025.mp4")["nb_read_frames"], 28 * 2)
-        self.assertEqual(t.probe(self.videos / "cam1" / "monthly" / "cam1_2026-01.mp4")["nb_read_frames"], 9 * 2)
+        self.assertEqual(self.names("monthly"), ["cam1_2025-12.mp4", "cam1_2026-01.mp4"])
+        self.assertEqual(self.names("yearly"), ["cam1_2025.mp4"])  # 2026 has not ended
+        # each video holds every picture of its own period
+        self.assertEqual(t.probe(self.videos / "cam1" / "yearly" / "cam1_2025.mp4")["nb_read_frames"], 31 * 2)
+        self.assertEqual(t.probe(self.videos / "cam1" / "weekly" / "cam1_2026-W01.mp4")["nb_read_frames"], 7 * 2)
+        self.assertEqual(t.probe(self.videos / "cam1" / "monthly" / "cam1_2026-01.mp4")["nb_read_frames"], 6 * 2)
 
         # a second run is a no-op apart from the same warning
         before = {p: p.stat().st_mtime_ns for p in self.videos.rglob("*.mp4")}
         t.stitch(GOOD, today, self.images, self.videos)
         self.assertEqual(before, {p: p.stat().st_mtime_ns for p in self.videos.rglob("*.mp4")})
 
-    def test_corrupt_image_blocks_the_chain_and_is_reported(self):
+    def test_each_kind_of_video_has_its_own_speed_window_and_switch(self):
+        self.fill(date(2025, 12, 29), date(2025, 12, 31), hours=("08", "12", "20"))
+        cfg = changed(daily={"make": False}, weekly={"make": False}, monthly={"fps": 3},
+                      yearly={"from": "11:00", "to": "13:00", "fps": 5})
+        t.stitch(cfg, date(2026, 2, 2), self.images, self.videos)
+        self.assertEqual(sorted(p.name for p in (self.videos / "cam1").iterdir()), ["monthly", "yearly"])
+        month, year = self.videos / "cam1" / "monthly" / "cam1_2025-12.mp4", self.videos / "cam1" / "yearly" / "cam1_2025.mp4"
+        self.assertEqual((t.probe(month)["nb_read_frames"], stream(month, "r_frame_rate")), (9, "3/1"))
+        self.assertEqual((t.probe(year)["nb_read_frames"], stream(year, "r_frame_rate")), (3, "5/1"))  # midday only
+
+    def test_every_look_option_at_once(self):
+        self.fill(date(2026, 1, 5), date(2026, 1, 7))
+        everything = {"size": "720", "shape": "1:1", "turn": "right", "mirror": True, "format": "h265",
+                      "quality": "small", "deflicker": True, "blend": "strong", "denoise": True, "sharpen": True,
+                      "brightness": 10, "contrast": 120, "saturation": 150, "stamp": "datetime"}
+        self.assertEqual(set(everything), set(t.VIDEO))
+        self.assertEqual(t.stitch(changed(everything), date(2026, 1, 8), self.images, self.videos), [])
+        day = self.videos / "cam1" / "daily" / "cam1_2026-01-06.mp4"
+        self.assertEqual(t.probe(day), {"nb_read_frames": 2, "width": 240, "height": 240})  # 320x240 turned and squared
+        self.assertEqual(stream(day, "codec_name,codec_tag_string"), "hevc,hvc1")
+        for choices in ({"turn": "left", "shape": "9:16"}, {"turn": "upside-down", "shape": "16:9", "size": "2160"},
+                        {"quality": "medium", "blend": "light", "stamp": "date", "shape": "4:3"}):
+            out = self.videos / "one.mp4"
+            t.build(sorted(self.images.rglob("*.jpg")), out, 12, {**t.VIDEO, **choices}, "one")
+            self.assertEqual(t.probe(out)["nb_read_frames"], 6, choices)
+            out.unlink()
+
+    def test_stamp_is_drawn_even_when_pictures_are_blended(self):
+        self.fill(date(2026, 1, 5), date(2026, 1, 6))
+        shots = sorted(self.images.rglob("*.jpg"))
+
+        def corner(stamp):  # bottom-left of the last frame, where the stamp goes
+            out = self.videos / f"{stamp}.mp4"
+            t.build(shots, out, 12, {**t.VIDEO, "blend": "light", "stamp": stamp}, stamp)
+            return subprocess.run(["ffmpeg", "-v", "error", "-i", str(out), "-vf", "reverse,crop=iw/2:ih/6:0:ih*5/6",
+                                   "-frames:v", "1", "-f", "rawvideo", "-pix_fmt", "gray", "-"],
+                                  capture_output=True, check=True).stdout
+
+        plain = corner("off")
+        self.assertEqual(plain, corner("off"))  # the encode is repeatable, so any difference below is the stamp
+        differing = sum(a != b for a, b in zip(plain, corner("datetime")))
+        self.assertGreater(differing, len(plain) // 50)
+
+    def test_corrupt_picture_is_named_and_other_videos_still_build(self):
         for d in ("2026-01-05", "2026-01-06"):
             jpeg(self.images / "cam1" / d / f"cam1_{d}_08-00-00.jpg")
         bad = self.images / "cam1" / "2026-01-06" / "cam1_2026-01-06_12-00-00.jpg"
         bad.write_bytes(next(self.images.rglob("*.jpg")).read_bytes()[:3000])
         problems = t.stitch({**GOOD, "times": ["08:00"]}, date(2026, 2, 2), self.images, self.videos)
-        self.assertEqual(len(problems), 2, problems)
+        # the day, the week and the month holding the bad picture, plus the missed-snapshot warning
+        self.assertEqual(len(problems), 4, problems)
         self.assertIn("cam1_2026-01-06.mp4", problems[0])
         self.assertIn(f"{bad.name} is corrupt", problems[0])  # names the file to delete
-        self.assertFalse((self.videos / "cam1" / "weekly").exists())
+        self.assertEqual(self.names("daily"), ["cam1_2026-01-05.mp4"])
         self.assertEqual(list(self.videos.rglob("*.part")), [])
 
 

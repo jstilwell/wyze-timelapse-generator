@@ -12,7 +12,8 @@ from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
 
 from rtsp_grabber import GrabError, grab_frame
-from timelapse import CONFIG, HHMM, IMAGES, NAME, URL, read_config, validate, well_formed
+from timelapse import (CHOICES, CONFIG, HHMM, IMAGES, LEVELS, NAME, RANGES, SHOT, SWITCHES, URL, read_config, still,
+                       validate, well_formed, with_defaults)
 
 MASK = "••••"  # shown in place of a saved camera password
 
@@ -40,7 +41,7 @@ section { margin-top: 2.5rem; padding-top: 1.5rem; border-top: 1px solid var(--l
 .hint { max-width: 38rem; }
 
 label, legend { display: block; font-weight: 600; font-size: .875rem; margin-top: 1rem; padding: 0; }
-input, textarea {
+input, textarea, select {
   display: block; width: 100%; margin-top: .25rem; padding: .5rem .625rem;
   font: inherit; font-variant-numeric: tabular-nums; color: inherit;
   background: var(--surface); border: 1px solid var(--edge); border-radius: 6px;
@@ -49,15 +50,20 @@ textarea { resize: vertical; }
 input[type=checkbox] { display: inline; width: auto; margin: 0 .25rem 0 0; }
 label.tick { display: inline; font-weight: 400; margin: 0; }
 input[type=time], input[type=number] { max-width: 12rem; }
+select { appearance: none; padding-right: 2rem; background-image: linear-gradient(45deg, transparent 50%, var(--muted) 50%),
+  linear-gradient(135deg, var(--muted) 50%, transparent 50%); background-size: 6px 6px; background-repeat: no-repeat;
+  background-position: calc(100% - 17px) 55%, calc(100% - 11px) 55%; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
-.camera { border: 0; margin: 1.5rem 0 0; padding: 0; min-width: 0; }
-.camera legend { font-size: 1rem; margin: 0; }
+.camera, .level { border: 0; margin: 1.5rem 0 0; padding: 0; min-width: 0; }
+.camera legend, .level legend { font-size: 1rem; margin: 0; }
+.ticks { display: grid; grid-template-columns: repeat(auto-fit, minmax(16rem, 1fr)); gap: .5rem 1.25rem; margin-top: 1.25rem; }
 .row { display: grid; grid-template-columns: 15rem 1fr; gap: 0 1.25rem; align-items: start; }
 .row label:first-child { margin-top: .5rem; }
 figure { margin: .5rem 0 0; }
 figure img, .empty { display: block; width: 100%; aspect-ratio: 16 / 9; border-radius: 6px; }
 figure img { object-fit: cover; background: var(--line); }
+figure img.whole { aspect-ratio: auto; }  /* a preview shows its real shape, stamp and all */
 .empty { display: grid; place-items: center; padding: 1rem; text-align: center; border: 1px dashed var(--edge); }
 figcaption { margin-top: .375rem; }
 .ok { color: var(--ok); }
@@ -68,7 +74,8 @@ figcaption { margin-top: .375rem; }
 .day .build { stroke: var(--accent); stroke-width: 5; }
 .hours { display: flex; justify-content: space-between; font-size: .75rem; font-variant-numeric: tabular-nums; }
 
-.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 1.25rem; }
+.fields { display: grid; grid-template-columns: repeat(auto-fit, minmax(9rem, 1fr)); gap: 0 1.25rem; align-items: end; }
+.fields.wide { grid-template-columns: repeat(auto-fit, minmax(13rem, 1fr)); }
 details { margin-top: 1rem; }
 summary { cursor: pointer; color: var(--accent); font-weight: 600; font-size: .875rem; }
 
@@ -132,23 +139,31 @@ and yearly videos.</p>
     <input id="stitch_time" name="stitch_time" type="time" value="{stitch_time}" required
       aria-describedby="stitch-hint">
     <p class="hint" id="stitch-hint">Once a day. Pick a time after midnight, when the day's pictures are complete.</p>
+    <label for="jpeg_quality">Picture quality (1 to 100)</label>
+    <input id="jpeg_quality" name="jpeg_quality" type="number" min="1" max="100" value="{jpeg_quality}" required
+      aria-describedby="quality-hint">
+    <p class="hint" id="quality-hint">Higher is sharper and takes more space.</p>
   </section>
 
   <section>
     <h2>Videos</h2>
-    <div class="fields">
-      <div><label for="fps">Pictures per second of video</label>
-        <input id="fps" name="fps" type="number" min="1" max="60" value="{fps}" required></div>
-      <div><label for="jpeg_quality">Picture quality (1 to 100)</label>
-        <input id="jpeg_quality" name="jpeg_quality" type="number" min="1" max="100" value="{jpeg_quality}" required></div>
-    </div>
-    <p class="hint">{lengths} Higher quality is sharper and takes more space.</p>
+    <p class="hint">Each kind of video has its own speed and can use only the pictures taken in part of the day.
+    A narrow window, such as 11:00 to 13:00 for the yearly video, stops day and night flashing past.</p>
+    {levels}
+  </section>
+
+  <section>
+    <h2>Look</h2>
+    <p class="hint">Applies to videos built from now on. To remake an older video, delete its file and it is
+    built again the next night. Preview look shows the result on each camera's latest picture.</p>
+    {look}
   </section>
 
   <section class="actions">
     <button>Save settings</button>
     <button class="quiet" name="action" value="test">Test cameras</button>
-    <p class="hint">A test takes up to 20 seconds and saves nothing.</p>
+    <button class="quiet" name="action" value="preview">Preview look</button>
+    <p class="hint">Testing and previewing save nothing. A test takes up to 20 seconds.</p>
   </section>
 </form>
 </main>
@@ -207,7 +222,7 @@ def latest(cam):
     """Newest saved picture of a camera, or None. `cam` comes from the request, so it is checked before it is a path."""
     if NAME.fullmatch(cam):
         for day in sorted((IMAGES / cam).glob("????-??-??"), reverse=True):
-            shots = sorted(day.glob(f"{cam}_*.jpg"))
+            shots = sorted(p for p in day.glob(f"{cam}_*.jpg") if SHOT.fullmatch(p.name))
             if shots:
                 return shots[-1]
 
@@ -230,6 +245,20 @@ def try_camera(cam):
     return (f'<img src="data:image/jpeg;base64,{base64.b64encode(frame).decode()}" '
             f'alt="Live picture from {html.escape(cam["name"])}">'
             '<figcaption class="ok">Connected. This is what the camera sees now.</figcaption>')
+
+
+def preview(cam, video):
+    """The look applied to a camera's latest picture, for its picture slot."""
+    shot = latest(cam["name"])
+    if not shot:
+        return '<p class="empty hint">No picture yet to preview. The first one arrives at the next picture time.</p>'
+    try:
+        frame = still(shot, video)
+    except RuntimeError as e:
+        return f'<p class="empty bad">The preview could not be made.</p><figcaption>{html.escape(str(e)[-160:])}</figcaption>'
+    return (f'<img class="whole" src="data:image/jpeg;base64,{base64.b64encode(frame).decode()}" '
+            f'alt="Preview of the look on {html.escape(cam["name"])}">'
+            '<figcaption>The look on the latest picture. Flicker and blending only show in videos.</figcaption>')
 
 
 def camera_rows(cameras, secret, tests):
@@ -291,18 +320,77 @@ def day_strip(cfg):
             '<span>18:00</span><span>24:00</span></div>')
 
 
-def lengths(cfg):
-    """How long the videos come out with these settings, so a too-short result is visible before a month goes by."""
-    n, fps = len(cfg["times"]), cfg.get("fps")
-    if not n or type(fps) is not int or fps < 1:
-        return ""
+def plays(cfg, level):
+    """How long one video of this kind comes out, so a too-short or empty one shows before a month goes by."""
+    own = cfg["levels"][level]
+    if not own["make"]:
+        return "Not made."
+    n = sum(own["from"] <= t <= own["to"] for t in cfg["times"])
+    if not n or type(own["fps"]) is not int or own["fps"] < 1:
+        return "No picture time falls in this window, so nothing would be made."
+    seconds = n * {"daily": 1, "weekly": 7, "monthly": 30, "yearly": 365}[level] / own["fps"]
+    span = (f"{seconds:.1f} seconds" if seconds < 10 else f"{seconds:.0f} seconds" if seconds < 90
+            else f"{seconds / 60:.1f} minutes")
+    return f"{n} picture{'s' * (n != 1)} a day: plays for about {span}."
 
-    def span(days):
-        s = days * n / fps
-        return f"{s:.1f} seconds" if s < 10 else f"{s:.0f} seconds" if s < 90 else f"{s / 60:.1f} minutes"
 
-    return (f"With {n} picture{'s' * (n != 1)} a day, a day's video plays for {span(1)}, "
-            f"a month's for about {span(30)} and a year's for about {span(365)}.")
+def level_rows(cfg):
+    rows = []
+    for level in LEVELS:
+        own = cfg["levels"][level]
+        fps, start, end = (html.escape(str(own.get(key, ""))) for key in ("fps", "from", "to"))
+        rows.append(f"""<fieldset class="level">
+      <legend><label class="tick"><input type="checkbox" name="{level}_make"{" checked" * (own.get("make") is True)}>Make
+        {level} videos</label></legend>
+      <div class="fields">
+        <div><label for="{level}_fps">Pictures per second</label>
+          <input id="{level}_fps" name="{level}_fps" type="number" min="1" max="60" value="{fps}" required></div>
+        <div><label for="{level}_from">Use pictures from</label>
+          <input id="{level}_from" name="{level}_from" type="time" value="{start}" required></div>
+        <div><label for="{level}_to">to</label>
+          <input id="{level}_to" name="{level}_to" type="time" value="{end}" required></div>
+      </div>
+      <p class="hint">{plays(cfg, level)}</p>
+    </fieldset>""")
+    return "\n    ".join(rows)
+
+
+LABELS = {
+    "size": ("Size", {"original": "Same as the camera", "2160": "4K (2160 lines)", "1080": "Full HD (1080 lines)",
+                      "720": "HD (720 lines)"}),
+    "shape": ("Shape", {"original": "Same as the camera", "16:9": "Widescreen 16:9", "4:3": "Classic 4:3",
+                        "1:1": "Square", "9:16": "Tall 9:16, for phones"}),
+    "turn": ("Turn the picture", {"none": "No", "right": "Quarter turn right", "upside-down": "Upside down",
+                                  "left": "Quarter turn left"}),
+    "format": ("Format", {"h264": "H.264, plays everywhere", "h265": "H.265, about half the size"}),
+    "quality": ("Video quality", {"high": "High", "medium": "Medium", "small": "Smallest file"}),
+    "blend": ("Blend pictures", {"off": "Off", "light": "A little", "strong": "A lot"}),
+    "stamp": ("Stamp in the corner", {"off": "None", "date": "Date", "datetime": "Date and time"}),
+    "mirror": "Mirror left to right",
+    "deflicker": "Even out flicker between pictures",
+    "denoise": "Reduce grain in dark pictures",
+    "sharpen": "Sharpen",
+    "brightness": "Brightness",
+    "contrast": "Contrast",
+    "saturation": "Colour strength",
+}
+
+
+def look_controls(video):
+    selects = "".join(
+        f'<div><label for="{key}">{LABELS[key][0]}</label><select id="{key}" name="{key}">'
+        + "".join(f'<option value="{value}"{" selected" * (video.get(key) == value)}>{text}</option>'
+                  for value, text in LABELS[key][1].items()) + "</select></div>" for key in CHOICES)
+    numbers = "".join(
+        f'<div><label for="{key}">{LABELS[key]}</label><input id="{key}" name="{key}" type="number" min="{lo}" '
+        f'max="{hi}" value="{html.escape(str(video.get(key, "")))}" required></div>' for key, (lo, hi) in RANGES.items())
+    switches = "".join(
+        f'<label class="tick"><input type="checkbox" name="{key}"{" checked" * (video.get(key) is True)}>'
+        f'{LABELS[key]}</label>' for key in SWITCHES)
+    return (f'<div class="fields wide">{selects}</div><div class="ticks">{switches}</div>'
+            f'<div class="fields">{numbers}</div><p class="hint">Blending smooths motion between pictures. Brightness '
+            'runs from -50 to 50 and 0 changes nothing; contrast and colour strength are percentages, so 100 changes '
+            'nothing.</p>')
 
 
 def render(cfg, message="", saved=None, tests=None):
@@ -316,9 +404,9 @@ def render(cfg, message="", saved=None, tests=None):
         day=day_strip(cfg),
         times=html.escape(", ".join(cfg["times"])),
         stitch_time=html.escape(cfg["stitch_time"]),
-        fps=html.escape(str(cfg.get("fps", ""))),
         jpeg_quality=html.escape(str(cfg.get("jpeg_quality", ""))),
-        lengths=lengths(cfg),
+        levels=level_rows(cfg),
+        look=look_controls(cfg["video"]),
     )
 
 
@@ -330,7 +418,7 @@ def from_form(form, saved=()):
         return form.get(key, [""])[0].strip()
 
     def number(key):
-        return int(field(key)) if field(key).isdecimal() else field(key)
+        return int(field(key)) if re.fullmatch(r"-?[0-9]+", field(key)) else field(key)
 
     errors = []
     stored = {mask(c["url"]): c["url"] for c in saved}
@@ -355,8 +443,12 @@ def from_form(form, saved=()):
             times = sorted({*times, *(f"{m // 60:02}:{m % 60:02}" for m in range(a, b + 1, int(every)))})
         else:
             errors.append("evenly spaced times: fill in From, a later To, and Every as 5 minutes or more")
-    return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"), "fps": number("fps"),
-            "jpeg_quality": number("jpeg_quality")}, errors
+    levels = {level: {"make": f"{level}_make" in form, "fps": number(f"{level}_fps"),
+                      "from": field(f"{level}_from"), "to": field(f"{level}_to")} for level in LEVELS}
+    video = ({key: field(key) for key in CHOICES} | {key: key in form for key in SWITCHES}
+             | {key: number(key) for key in RANGES})
+    return {"cameras": cameras, "times": times, "stitch_time": field("stitch_time"),
+            "jpeg_quality": number("jpeg_quality"), "levels": levels, "video": video}, errors
 
 
 def load():
@@ -367,7 +459,7 @@ def load():
             return cfg, ""
     except (OSError, ValueError):
         pass
-    return (json.loads(CONFIG.with_name("config.example.json").read_text()),
+    return (with_defaults(json.loads(CONFIG.with_name("config.example.json").read_text())),
             '<div role="alert">config.json could not be read, so these are the example settings. '
             'Saving replaces the file.</div>')
 
@@ -434,6 +526,11 @@ class Handler(BaseHTTPRequestHandler):
             return self.reply(200, render(cfg, '<div role="status">Test finished. Nothing was saved.</div>',
                                           stored, tests))
         errors += validate(cfg)
+        if form.get("action") == ["preview"] and not errors:
+            with ThreadPoolExecutor() as pool:
+                tests = list(pool.map(lambda cam: preview(cam, cfg["video"]), cfg["cameras"]))
+            return self.reply(200, render(cfg, '<div role="status">Preview made. Nothing was saved.</div>',
+                                          stored, tests))
         if not errors:
             try:
                 tmp = CONFIG.with_suffix(".tmp")
