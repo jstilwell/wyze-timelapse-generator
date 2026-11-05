@@ -70,7 +70,7 @@ if [[ $1 != schedules ]]; then  # first-time checks, then build the image and st
     print "Pictures go to ~/Pictures/wyze-timelapse and videos to ~/Movies/wyze-timelapse."
     print "To use other folders, run:  open -e $root/.env   and then this script again."
   fi
-  chmod 600 $cfg $root/.env  # camera passwords and notification addresses: this user only
+  chmod 600 $cfg $root/.env  # camera passwords and alert keys: this user only
   for key in IMAGES_PATH VIDEOS_PATH; do
     dir=$(sed -n "s/^$key=//p" $root/.env)
     [[ -d $dir ]] || { print -u2 "$key in $root/.env is '$dir', which is not an existing folder. Fix it and run this again."; exit 1 }

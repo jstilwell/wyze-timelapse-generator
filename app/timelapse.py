@@ -54,13 +54,31 @@ VIEW_MODELS = {"claude-opus-5-5": ("Claude Opus 5.5", 4.00, 20.00),
                "claude-haiku-5-5": ("Claude Haiku 5.5", 0.10, 0.50)}
 NAME = re.compile(r"[a-z0-9][a-z0-9_-]{0,31}")
 URL = re.compile(r"rtsps?://\S+")
+EMAIL = r'[^\s@"\\<>]+@[^\s@"\\<>]+\.[^\s@"\\<>]+'
+# Where failures are sent: each setting's allowed form, and what to say otherwise (never the value: it may be a key).
+# run.sh writes these between double quotes in a curl config, so no pattern may allow " or \ or a line break.
+ALERT_FIELDS = {
+    "ntfy_url": (r'https?://[^\s"\\]+', "ntfy: the topic address must start with https://"),
+    "telegram_token": (r"[0-9]+:[\w-]+", "Telegram: a bot token looks like 123456:ABC-def"),
+    "telegram_chat": (r"-?[0-9]+|@\w+", "Telegram: the chat id is a number, or @ and a channel name"),
+    "pushover_token": (r"[A-Za-z0-9]+", "Pushover: the app token is letters and numbers only"),
+    "pushover_user": (r"[A-Za-z0-9]+", "Pushover: the user key is letters and numbers only"),
+    "email_provider": (r"resend|cloudflare", "Email: choose Off, Resend or Cloudflare"),
+    "email_key": (r"[\w.-]+", "Email: the API key has a character no key has; paste it again"),
+    "email_account": (r"[0-9a-f]{32}", "Email: a Cloudflare account id is 32 letters and numbers"),
+    "email_from": (EMAIL, "Email: the from address must look like alerts@example.com"),
+    "email_to": (EMAIL, "Email: the to address must look like you@example.com"),
+}
+ALERTS = dict.fromkeys(ALERT_FIELDS, "")
 
 
 def with_defaults(cfg):
     """Fill in what an older or hand-written config leaves out. A top-level `fps` is the old single speed."""
-    if isinstance(cfg, dict) and isinstance(cfg.get("video", {}), dict) and isinstance(cfg.get("levels", {}), dict):
+    if (isinstance(cfg, dict) and isinstance(cfg.get("video", {}), dict) and isinstance(cfg.get("levels", {}), dict)
+            and isinstance(cfg.get("alerts", {}), dict)):
         fps = cfg.pop("fps", LEVEL["fps"])
         cfg["video"] = {**VIDEO, **cfg.get("video", {})}
+        cfg["alerts"] = {**ALERTS, **cfg.get("alerts", {})}
         cfg.setdefault("check_view", False)
         cfg.setdefault("view_notes", "")
         cfg.setdefault("view_model", next(iter(VIEW_MODELS)))
@@ -82,6 +100,7 @@ def well_formed(cfg):
     """True when every setting is the right kind of value, so validate() and the settings page can read it."""
     return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str) and isinstance(cfg.get("video"), dict)
             and isinstance(cfg.get("view_notes"), str) and isinstance(cfg.get("view_model"), str)
+            and isinstance(cfg.get("alerts"), dict) and all(isinstance(cfg["alerts"].get(key), str) for key in ALERTS)
             and isinstance(cfg.get("levels"), dict)
             and all(isinstance(cfg["levels"].get(level), dict) and isinstance(cfg["levels"][level].get("from"), str)
                     and isinstance(cfg["levels"][level].get("to"), str) for level in LEVELS)
@@ -90,6 +109,21 @@ def well_formed(cfg):
                                                 (("name", None), ("url", None), ("cert", ""), ("cert_host", "")))
                     for c in cfg["cameras"])
             and all(isinstance(t, str) for t in cfg["times"]))
+
+
+def alert_problems(alerts):
+    """Problems with the alert settings. Only the page checks these: a mistake here must not cost a picture."""
+    errs = [text for key, (form, text) in ALERT_FIELDS.items()
+            if alerts[key] and not re.fullmatch(form, alerts[key], re.ASCII)]
+    for text, pair in (("Telegram needs both the bot token and the chat id", ("telegram_token", "telegram_chat")),
+                       ("Pushover needs both the app token and the user key", ("pushover_token", "pushover_user"))):
+        if any(alerts[key] for key in pair) and not all(alerts[key] for key in pair):
+            errs.append(text)
+    if alerts["email_provider"] and not all(alerts[key] for key in ("email_key", "email_from", "email_to")):
+        errs.append("Email needs the API key, the from address and the to address")
+    elif alerts["email_provider"] == "cloudflare" and not alerts["email_account"]:
+        errs.append("Email through Cloudflare also needs the account id")
+    return errs
 
 
 def validate(cfg):

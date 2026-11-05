@@ -57,5 +57,17 @@
   "check_view": false,
   "view_notes": "",
   "view_model": "claude-opus-5-5",
-  "view_compare": true
+  "view_compare": true,
+  "alerts": {
+    "ntfy_url": "",
+    "telegram_token": "",
+    "telegram_chat": "",
+    "pushover_token": "",
+    "pushover_user": "",
+    "email_provider": "",
+    "email_key": "",
+    "email_account": "",
+    "email_from": "",
+    "email_to": ""
+  }
 }

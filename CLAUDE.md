@@ -35,10 +35,11 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 | `app/web.py` | Settings page: stdlib `http.server`, no external assets, and one line of JavaScript (it opens the model comparison dialog; its hash is in the CSP) |
 | `app/test_timelapse.py` | Every test. They run inside the image, where ffmpeg is. |
 | `launchd/install.sh` | Writes `.env`, starts the page, creates the LaunchAgents from `config/config.json` |
-| `launchd/run.sh` | Runs one job, logs it, sends the failure notification or the heartbeat |
+| `launchd/run.sh` | Runs one job, logs it, sends the failure alerts or the heartbeat |
+| `launchd/test-alerts.sh` | Runs the alert sending with `curl` stubbed. `test.sh` runs it on a Mac. |
 | `compose.yaml`, `Dockerfile` | The `grab`, `stitch` and `web` services |
 
-`config/config.json` and `.env` are git-ignored and hold camera passwords and alert addresses.
+`config/config.json` and `.env` are git-ignored and hold camera passwords, alert keys and alert addresses.
 
 ## Rules that are easy to break
 
@@ -54,6 +55,9 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
   refused. Unit tests cannot see this.
 - A saved camera password is never rendered, logged, or put in a notification. The page shows it masked
   and `from_form` restores it only for the exact same address.
+- An alert key is treated the same way (`ALERT_SECRETS`), and stays off command lines: `run.sh` gives it to `curl`
+  on stdin. `run.sh` sends alerts on the Mac, not in a container, because Docker being down is one of the failures
+  to report. Keep the `ALERT_FIELDS` patterns free of `"`, `\` and line breaks: the values go into a curl config.
 - Request input never becomes a path without matching `NAME` first.
 - An `rtsps://` camera is always verified. Its certificate is stored when the camera is saved (trust on
   first use, `pin` in `web.py`) and ffmpeg accepts only that one (`grab_frame`). Never turn verification off.
