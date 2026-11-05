@@ -13,6 +13,7 @@ cat > $tmp/bin/curl <<'STUB'
 #!/bin/zsh
 conf=$(cat)
 print -r -- "ARGS $*"$'\n'"CONF $conf" >> $CALLS
+[[ $* != *" -T "* ]] || cat ${@[-1]} >> $CALLS  # a mail message goes as a file
 [[ $conf != *pushover* ]]  # Pushover "fails", to show the others still go out
 STUB
 cat > $tmp/bin/osascript <<'STUB'
@@ -51,6 +52,16 @@ $tmp/launchd/run.sh test >/dev/null
 expect 'url = "https://api.resend.com/emails"'
 expect 'Wyze timelapse: test'
 if grep -q 'ntfy\|pushover' $CALLS; then print -u2 "test-alerts: a channel that is off was used"; exit 1; fi
+
+: > $CALLS
+sed -i '' 's/"resend"/"gmail"/' $tmp/config/config.json
+$tmp/launchd/run.sh reload >/dev/null || true
+expect 'url = "smtps://smtp.gmail.com:465"'
+expect 'user = "a@example.com:CFSECRET"'
+expect '--mail-from a@example.com --mail-rcpt b@example.com'
+expect 'Subject: Wyze timelapse: reload failed'
+expect 'PROBLEM: camera "front" said \ no'
+if grep '^ARGS' $CALLS | grep SECRET; then print -u2 "test-alerts: a key is on a command line"; exit 1; fi
 
 : > $CALLS
 print '{}' > $tmp/config/config.json  # an older config, and an address still in .env, as before these settings

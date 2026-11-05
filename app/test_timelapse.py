@@ -214,6 +214,13 @@ class Alerts(unittest.TestCase):
         self.assertEqual(web.from_form({**form, "telegram_token": [""]}, alerts=self.FILLED)[0]["alerts"]
                          ["telegram_token"], "")
 
+    def test_a_gmail_app_password_may_be_pasted_with_its_spaces(self):
+        form = {**FORM, "email_provider": ["gmail"], "email_key": ["abcd efgh ijkl mnop"],
+                "email_from": ["me@gmail.com"], "email_to": ["me@gmail.com"]}
+        cfg, errors = web.from_form(form)
+        self.assertEqual((cfg["alerts"]["email_key"], errors), ("abcdefghijklmnop", []))
+        self.assertEqual(t.alert_problems(cfg["alerts"]), [])
+
     def test_a_saved_key_is_not_sent_to_a_different_provider(self):
         form = {**FORM, "email_provider": ["resend"], "email_key": [web.MASK]}
         self.assertEqual(len(web.from_form(form, alerts=self.FILLED)[1]), 1)
