@@ -1,6 +1,8 @@
 """Run inside the image: docker compose run --rm --entrypoint python stitch -m unittest discover -s /app -v"""
 import http.client
 import json
+import socket
+import ssl
 import subprocess
 import tempfile
 import threading
@@ -17,6 +19,70 @@ import web
 
 GOOD = {"cameras": [{"name": "cam1", "url": "rtsp://10.0.0.5:8554/live"}], "times": ["08:00", "12:00"],
         "stitch_time": "00:30", "fps": 24, "jpeg_quality": 95}
+
+
+# Throwaway self-signed certificates for CN/SAN camera.test, made for these tests only and used nowhere else:
+#   openssl req -x509 -newkey ec -pkeyopt ec_paramgen_curve:prime256v1 -nodes -days 36500 -subj /CN=camera.test \
+#     -addext subjectAltName=DNS:camera.test
+CAMERA_CERT = """-----BEGIN CERTIFICATE-----
+MIIBeTCCASCgAwIBAgIUXDdpMG1qw5BHyIVFvbJRvWZAff0wCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLY2FtZXJhLnRlc3QwIBcNMjYxMTA1MTYxMjQ3WhgPMjEyNjEw
+MTIxNjEyNDdaMBYxFDASBgNVBAMMC2NhbWVyYS50ZXN0MFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAE3LLSVbfL3EnHfAJtS1Aj6v/241cn1l53Pm4jXxvRKQWl8m73
+93UULnEc2guXqZ5DG/xiFbJL/2o19wWshsQWuaNKMEgwHQYDVR0OBBYEFAd3MP69
+0hVtVs96h47vWqHNTEZ/MA8GA1UdEwEB/wQFMAMBAf8wFgYDVR0RBA8wDYILY2Ft
+ZXJhLnRlc3QwCgYIKoZIzj0EAwIDRwAwRAIgKjplZ5caRwlnQcbBEpi037jK62lO
+Wp5Ne+zWM/yMlNQCIDXq8YTB8TXETuY7e04lM0duZWU44iLkoG1R5vk5CEOL
+-----END CERTIFICATE-----
+"""
+CAMERA_KEY = """-----BEGIN PRIVATE KEY-----
+MIGHAgEAMBMGByqGSM49AgEGCCqGSM49AwEHBG0wawIBAQQgdtfIz0JafOI6BrVZ
+3dkS1M7DqwYyBsbljsP6UEM3vxihRANCAATcstJVt8vcScd8Am1LUCPq//bjVyfW
+Xnc+biNfG9EpBaXybvf3dRQucRzaC5epnkMb/GIVskv/ajX3BayGxBa5
+-----END PRIVATE KEY-----
+"""
+OTHER_CERT = """-----BEGIN CERTIFICATE-----
+MIIBejCCASCgAwIBAgIUEpShr9svyFnGDxnxA83BVJgUK1swCgYIKoZIzj0EAwIw
+FjEUMBIGA1UEAwwLY2FtZXJhLnRlc3QwIBcNMjYxMTA1MTYxMjQ3WhgPMjEyNjEw
+MTIxNjEyNDdaMBYxFDASBgNVBAMMC2NhbWVyYS50ZXN0MFkwEwYHKoZIzj0CAQYI
+KoZIzj0DAQcDQgAEvpNLd7v/ce5pslFZbs/l9Tbxlk8xpVDm3UbY3rDGilgx5qj7
+Awq2JOnTsb3CG8vYtxzUYzzoqaa6gJfyDl0a0aNKMEgwHQYDVR0OBBYEFJGASGx2
+zjxVooPqdb0lKaCOu3afMA8GA1UdEwEB/wQFMAMBAf8wFgYDVR0RBA8wDYILY2Ft
+ZXJhLnRlc3QwCgYIKoZIzj0EAwIDSAAwRQIhAMFNf8DGNVLaLuYqGFoJnnbdsDNa
+cDbLqKPCdKgo1rArAiBPMYFkzmJAJH5xBblpMFiiUAwfBc/8PZSRA9j4QERgfw==
+-----END CERTIFICATE-----
+"""
+
+
+def fake_rtsps_camera(test):
+    """A local TLS listener presenting CAMERA_CERT. Returns its rtsps address and a list that grows by one for
+    every handshake a client completed, which a client only does once it has accepted the certificate."""
+    tmp = tempfile.TemporaryDirectory()
+    test.addCleanup(tmp.cleanup)
+    Path(tmp.name, "cert.pem").write_text(CAMERA_CERT)
+    Path(tmp.name, "key.pem").write_text(CAMERA_KEY)
+    tls = ssl.SSLContext(ssl.PROTOCOL_TLS_SERVER)
+    tls.load_cert_chain(Path(tmp.name, "cert.pem"), Path(tmp.name, "key.pem"))
+    listener = socket.create_server(("127.0.0.1", 0))
+    test.addCleanup(listener.close)
+    handshakes = []
+
+    def serve():
+        while True:
+            try:
+                conn, _ = listener.accept()
+            except OSError:
+                return
+            try:
+                with tls.wrap_socket(conn, server_side=True) as client:
+                    client.settimeout(2)
+                    client.recv(1)  # a client that rejects the certificate says so here instead of sending data
+                    handshakes.append(1)
+            except OSError:
+                pass
+
+    threading.Thread(target=serve, daemon=True).start()
+    return f"rtsps://127.0.0.1:{listener.getsockname()[1]}/live", handshakes
 
 
 def jpeg(path, seed=0):
@@ -107,10 +173,52 @@ class Form(unittest.TestCase):
                     "every": ["1"]}, {"from": ["x"], "to": ["09:00"]}):
             self.assertEqual(len(web.from_form({**FORM, "every": ["30"], **bad})[1]), 1, bad)
 
+    def test_stored_certificate_stays_with_its_host_and_port_only(self):
+        saved = [{"name": "cam1", "url": "rtsps://10.0.0.5:7441/abc", "cert": "PEM", "cert_host": "camera.test"}]
+
+        def camera(url, **extra):
+            return web.from_form({**FORM, "url": [url, ""], **extra}, saved)[0]["cameras"][0]
+
+        self.assertEqual(camera("rtsps://10.0.0.5:7441/new-path"), {**saved[0], "url": "rtsps://10.0.0.5:7441/new-path"})
+        for url, extra in (("rtsps://10.0.0.6:7441/abc", {}), ("rtsps://10.0.0.5:7442/abc", {}),
+                           ("rtsp://10.0.0.5:7441/abc", {}), ("rtsps://10.0.0.5:7441/abc", {"repin": ["0"]})):
+            self.assertNotIn("cert", camera(url, **extra), (url, extra))
+
     def test_video_lengths(self):
         self.assertIn("0.1 seconds", web.lengths({**GOOD, "times": ["08:00", "12:00", "16:00"]}))
         self.assertIn("a year's for about 15.2 minutes", web.lengths({**GOOD, "times": ["08:00"] * 60}))
         self.assertEqual(web.lengths({**GOOD, "fps": "x"}), "")
+
+
+class Pinning(unittest.TestCase):
+    def setUp(self):
+        self.url, self.handshakes = fake_rtsps_camera(self)
+
+    def test_pin_reads_the_certificate_and_its_name(self):
+        pinned = web.pin(self.url)
+        self.assertEqual(pinned["cert_host"], "camera.test")
+        self.assertEqual(ssl.PEM_cert_to_DER_cert(pinned["cert"]), ssl.PEM_cert_to_DER_cert(CAMERA_CERT))
+        for nowhere in ("rtsps://127.0.0.1:1/live", "rtsps:///live", "rtsps://127.0.0.1:99999/live"):
+            with self.assertRaises((OSError, ValueError)):
+                web.pin(nowhere)
+
+    def test_ffmpeg_accepts_only_the_stored_certificate(self):
+        # The listener is no camera, so every grab fails; what differs is whether ffmpeg trusted it enough to talk.
+        with self.assertRaises(GrabError) as trusted:
+            grab_frame(self.url, timeout=3, cert=CAMERA_CERT, cert_host="camera.test")
+        self.assertNotIn("certificate verify failed", str(trusted.exception))
+        self.assertEqual(len(self.handshakes), 1)
+        for cert, host in ((OTHER_CERT, "camera.test"), (CAMERA_CERT, "elsewhere.test")):
+            with self.assertRaises(GrabError) as refused:
+                grab_frame(self.url, timeout=3, cert=cert, cert_host=host)
+            self.assertIn("certificate verify failed", str(refused.exception), host)
+        self.assertEqual(len(self.handshakes), 1)
+
+    def test_rtsps_without_a_stored_certificate_never_connects(self):
+        with self.assertRaises(GrabError) as caught:
+            grab_frame(self.url, timeout=3)
+        self.assertIn("not stored yet", str(caught.exception))
+        self.assertEqual(self.handshakes, [])
 
 
 class Server(unittest.TestCase):
@@ -203,10 +311,22 @@ class Server(unittest.TestCase):
         self.assertNotIn(b"hunter2", body.replace(b'value="rtsp://admin:hunter2@', b""))  # only where it was typed
         self.assertEqual(self.config.read_text(), before)
 
+    def test_saving_an_rtsps_camera_stores_its_certificate(self):
+        url, _ = fake_rtsps_camera(self)
+        self.assertEqual(self.ask("POST", "/", {**FORM, "url": [url, ""]})[0], 303)
+        camera = json.loads(self.config.read_text())["cameras"][0]
+        self.assertEqual((camera["url"], camera["cert_host"]), (url, "camera.test"))
+        self.assertIn(b"certificate is stored", self.ask("GET", "/")[1])
+        # a camera that cannot be asked for its certificate is not saved without one
+        status, body, _ = self.ask("POST", "/", {**FORM, "url": ["rtsps://127.0.0.1:1/live", ""]})
+        self.assertEqual(status, 400)
+        self.assertIn(b"certificate could not be read", body)
+        self.assertEqual(json.loads(self.config.read_text())["cameras"][0], camera)
+
     def test_camera_test_shows_the_live_picture(self):
         old = web.grab_frame
         self.addCleanup(lambda: setattr(web, "grab_frame", old))
-        web.grab_frame = lambda url, quality, timeout: b"frame" if url == SECRET else self.fail(url)
+        web.grab_frame = lambda url, quality, **kw: b"frame" if url == SECRET else self.fail(url)
         # the saved address comes back masked, and the test still reaches the camera with the stored password
         body = self.ask("POST", "/", {**FORM, "url": [web.mask(SECRET), ""], "action": ["test"]})[1]
         self.assertIn(b'src="data:image/jpeg;base64,ZnJhbWU="', body)
@@ -232,7 +352,7 @@ class Media(unittest.TestCase):
     def test_snapshot_writes_validated_tagged_jpeg_and_rejects_bad_frames(self):
         src = self.images / "src.jpg"
         jpeg(src)
-        out = t.snapshot(lambda url, quality: src.read_bytes(), GOOD["cameras"][0], 95, self.images)
+        out = t.snapshot(lambda url, quality, **pin: src.read_bytes(), GOOD["cameras"][0], 95, self.images)
         self.assertEqual(out.parent.parent.name, "cam1")
         exif = piexif.load(str(out))
         self.assertEqual(exif["0th"][piexif.ImageIFD.Make], b"Wyze")
@@ -243,7 +363,7 @@ class Media(unittest.TestCase):
         t.time.sleep = lambda s: None
         for frame in (b"not a jpeg", src.read_bytes()[:3000]):
             with self.assertRaises(RuntimeError):
-                t.snapshot(lambda url, quality: frame, GOOD["cameras"][0], 95, self.images)
+                t.snapshot(lambda url, quality, **pin: frame, GOOD["cameras"][0], 95, self.images)
         self.assertEqual(len(list(self.images.rglob("cam1_*"))), 1)  # nothing bad or half-written left behind
 
     def test_grab_error_never_leaks_the_camera_password(self):

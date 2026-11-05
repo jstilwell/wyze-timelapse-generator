@@ -7,6 +7,7 @@ one per day, week, month and year. It runs by itself on a Mac and tells you when
 
 You need a Mac (macOS 12 or newer), [Docker Desktop](https://www.docker.com/products/docker-desktop/)
 opened once, and a Wyze camera with RTSP turned on (Wyze app: camera Settings, Advanced Settings, RTSP).
+Other cameras with an `rtsp://` or `rtsps://` address work too, UniFi Protect included.
 
 1. Put this folder somewhere it can stay. If you move it later, run step 2 again.
 2. In Terminal, from this folder, run `./launchd/install.sh`
@@ -55,6 +56,7 @@ Edit `.env` with `open -e .env`. No need to run anything afterwards.
 | Message | What to do |
 | --- | --- |
 | `no usable frame after 3 attempts` | The camera is off, has a new address, or its password changed. Check it with **Test cameras**. |
+| `certificate verify failed` | An `rtsps://` camera is showing a different certificate than the one stored when it was added. If the camera was reset or updated, tick "store its new certificate" for it on the settings page and save. |
 | `only 1 of 3 snapshots were taken` | The Mac was asleep or off, or the camera was unreachable. Nothing to repair. |
 | `… is corrupt` | Delete the file it names from the pictures or videos folder, then run `./launchd/run.sh stitch`. |
 | `Cannot connect to the Docker daemon` | Open Docker Desktop. In its settings, turn on starting when you sign in. |

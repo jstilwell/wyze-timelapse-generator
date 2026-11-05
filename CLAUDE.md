@@ -35,6 +35,8 @@ snapshot per camera and stitch finished days into videos; a localhost page edits
 - A saved camera password is never rendered, logged, or put in a notification. The page shows it masked
   and `from_form` restores it only for the exact same address.
 - Request input never becomes a path without matching `NAME` first.
+- An `rtsps://` camera is always verified. Its certificate is stored when the camera is saved (trust on
+  first use, `pin` in `web.py`) and ffmpeg accepts only that one (`grab_frame`). Never turn verification off.
 - Output is written to a `.part` or `.tmp` name, validated, then moved into place with `os.replace`.
 - Jobs report each failure as one `PROBLEM:` line and exit non-zero; `run.sh` turns those into alerts.
 - Containers run read-only, as `nobody`, with no capabilities. `/tmp` is the only scratch space.

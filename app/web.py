@@ -5,6 +5,8 @@ import html
 import json
 import os
 import re
+import socket
+import ssl
 from concurrent.futures import ThreadPoolExecutor
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from urllib.parse import parse_qs, urlsplit
@@ -44,6 +46,8 @@ input, textarea {
   background: var(--surface); border: 1px solid var(--edge); border-radius: 6px;
 }
 textarea { resize: vertical; }
+input[type=checkbox] { display: inline; width: auto; margin: 0 .25rem 0 0; }
+label.tick { display: inline; font-weight: 400; margin: 0; }
 input[type=time], input[type=number] { max-width: 12rem; }
 :focus-visible { outline: 2px solid var(--accent); outline-offset: 2px; }
 
@@ -169,6 +173,36 @@ def mask(url):
     return re.sub(r"(//[^/\s:]*):[^/\s]*@", rf"\1:{MASK}@", url)
 
 
+def endpoint(url):
+    """(host, port) of a camera address, the thing a stored certificate belongs to. None if it has neither."""
+    try:
+        parts = urlsplit(url)
+        return parts.hostname and (parts.hostname, parts.port or 322)  # 322: the rtsps default
+    except ValueError:
+        return None
+
+
+def pin(url):
+    """Trust on first use: the certificate an rtsps camera presents now, and a name it is issued to. Every later
+    grab is verified against the two (see grab_frame). Raises OSError or ValueError if the camera cannot be asked."""
+    where = endpoint(url)
+    if not where:
+        raise ValueError("no host in the address")
+    cert = ssl.get_server_certificate(where, timeout=8)
+    # Connect once more, accepting nothing but that certificate, to read the names it carries. The name check is
+    # off here because the name is what is being looked up; the address is usually an IP the certificate lacks.
+    only = ssl.SSLContext(ssl.PROTOCOL_TLS_CLIENT)
+    only.check_hostname = False
+    only.load_verify_locations(cadata=cert)
+    with socket.create_connection(where, timeout=8) as sock, only.wrap_socket(sock) as tls:
+        seen = tls.getpeercert()
+    names = ([value for kind, value in seen.get("subjectAltName", ()) if kind == "DNS"]
+             or [value for part in seen.get("subject", ()) for kind, value in part if kind == "commonName"])
+    if not names:
+        raise ValueError("the certificate names no host")
+    return {"cert": cert, "cert_host": names[0]}
+
+
 def latest(cam):
     """Newest saved picture of a camera, or None. `cam` comes from the request, so it is checked before it is a path."""
     if NAME.fullmatch(cam):
@@ -183,10 +217,12 @@ def try_camera(cam):
     if not URL.fullmatch(cam["url"]) or MASK in cam["url"]:
         return '<p class="empty bad">Fill in the whole address first.</p>'
     try:
-        frame = grab_frame(cam["url"], 80, timeout=8)
+        frame = grab_frame(cam["url"], 80, timeout=8, cert=cam.get("cert"), cert_host=cam.get("cert_host"))
     except GrabError as e:
         reason = str(e)
         hint = ("The camera did not accept the user name or password." if "401" in reason else
+                "The camera's certificate could not be read, or is not the one stored for it."
+                if "certificate" in reason else
                 "Nothing answered at that address. Check it, and that the camera is switched on."
                 if re.search("refused|no route|unreachable|timed out|no frame within", reason, re.I) else
                 "The camera answered but sent no picture.")
@@ -212,6 +248,10 @@ def camera_rows(cameras, secret, tests):
             picture = '<p class="empty hint">Fill in both boxes to add a camera.</p>'
         # A saved address is shown with its password hidden; one typed in this request is shown back as typed.
         url = html.escape(mask(cam["url"]) if cam["url"] in secret else cam["url"])
+        pinned = cam.get("cert") and f"""
+          <p class="hint">This camera's certificate is stored, and any other is refused.
+            <label class="tick"><input type="checkbox" name="repin" value="{i}">The camera was reset: store its
+            new certificate</label></p>"""
         rows.append(f"""<fieldset class="camera">
       <legend>{name or "Add a camera"}</legend>
       <div class="row">
@@ -223,7 +263,7 @@ def camera_rows(cameras, secret, tests):
             autocomplete="off" autocapitalize="none" spellcheck="false">
           <label for="url-{i}">Address</label>
           <input id="url-{i}" name="url" value="{url}" placeholder="rtsp://user:password@192.168.1.50/live"
-            autocomplete="off" autocapitalize="none" spellcheck="false">
+            autocomplete="off" autocapitalize="none" spellcheck="false">{pinned or ""}
         </div>
       </div>
     </fieldset>""")
@@ -284,7 +324,8 @@ def render(cfg, message="", saved=None, tests=None):
 
 def from_form(form, saved=()):
     """(config, problems) from a posted form. `saved` is the stored camera list: an address that comes back
-    still masked gets its stored password, and only for that exact address."""
+    still masked gets its stored password, and only for that exact address. An rtsps camera keeps its stored
+    certificate while its host and port stay the same and its "store the new one" box is not ticked."""
     def field(key):
         return form.get(key, [""])[0].strip()
 
@@ -293,11 +334,18 @@ def from_form(form, saved=()):
 
     errors = []
     stored = {mask(c["url"]): c["url"] for c in saved}
-    cameras = [{"name": name.strip(), "url": stored.get(url.strip(), url.strip())}
-               for name, url in zip(form.get("name", []), form.get("url", [])) if name.strip() or url.strip()]
-    for c in cameras:
-        if MASK in c["url"]:
-            errors.append(f"camera {c['name']!r}: type the password again in place of {MASK}")
+    pins = {endpoint(c["url"]): c for c in saved if c.get("cert") and c.get("cert_host")}
+    cameras = []
+    for row, (name, url) in enumerate(zip(form.get("name", []), form.get("url", []))):
+        cam = {"name": name.strip(), "url": stored.get(url.strip(), url.strip())}
+        if not (cam["name"] or cam["url"]):
+            continue
+        old = pins.get(endpoint(cam["url"]))
+        if cam["url"].startswith("rtsps:") and old and str(row) not in form.get("repin", []):
+            cam |= {"cert": old["cert"], "cert_host": old["cert_host"]}
+        if MASK in cam["url"]:
+            errors.append(f"camera {cam['name']!r}: type the password again in place of {MASK}")
+        cameras.append(cam)
 
     times = [t for t in re.split(r"[,\s]+", field("times")) if t]
     start, end, every = field("from"), field("to"), field("every")
@@ -373,6 +421,13 @@ class Handler(BaseHTTPRequestHandler):
         form = parse_qs(self.rfile.read(int(length)).decode("utf-8", "replace"), keep_blank_values=True)
         stored = load()[0]["cameras"]
         cfg, errors = from_form(form, stored)
+        for cam in cfg["cameras"]:
+            if cam["url"].startswith("rtsps:") and "cert" not in cam:
+                try:
+                    cam |= pin(cam["url"])
+                except (OSError, ValueError):
+                    errors.append(f"camera {cam['name']!r}: its certificate could not be read. Check the address "
+                                  "and that the camera is switched on.")
         if form.get("action") == ["test"]:
             with ThreadPoolExecutor() as pool:
                 tests = list(pool.map(try_camera, cfg["cameras"]))

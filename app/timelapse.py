@@ -36,7 +36,8 @@ def well_formed(cfg):
     """True when every setting is the right kind of value, so validate() and the settings page can read it."""
     return (isinstance(cfg, dict) and isinstance(cfg.get("stitch_time"), str)
             and isinstance(cfg.get("cameras"), list) and isinstance(cfg.get("times"), list)
-            and all(isinstance(c, dict) and isinstance(c.get("name"), str) and isinstance(c.get("url"), str)
+            and all(isinstance(c, dict) and all(isinstance(c.get(key, default), str) for key, default in
+                                                (("name", None), ("url", None), ("cert", ""), ("cert_host", "")))
                     for c in cfg["cameras"])
             and all(isinstance(t, str) for t in cfg["times"]))
 
@@ -90,7 +91,7 @@ def probe(src):
 def snapshot(grab, cam, quality, images):
     for attempt in range(3):
         try:
-            jpeg = grab(cam["url"], quality)
+            jpeg = grab(cam["url"], quality, cert=cam.get("cert"), cert_host=cam.get("cert_host"))
             size = probe(jpeg)
             break
         except (GrabError, ValueError) as e:
